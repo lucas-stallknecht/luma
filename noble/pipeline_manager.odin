@@ -112,12 +112,45 @@ pipeline_manager_remove :: proc(m: ^Pipeline_Manager, name: string) {
 	delete_key(&m.raster_pipelines, name)
 }
 
-pipeline_reload_all :: proc(m: ^Pipeline_Manager) {
+pipeline_reload_all :: proc(m: ^Pipeline_Manager) -> bool {
+	// two-phase reload: compile all shaders first. If any compilation fails,
+	// do not destroy or recreate existing pipelines
+	entries := make([dynamic]struct {
+		name: string,
+		vertex: []u32,
+		fragment: []u32,
+	}, context.temp_allocator)
+
+	all_ok: bool = true
+	for name, &pipeline in m.raster_pipelines {
+		v, v_ok := compile_and_load_spirv(m, pipeline.info.vertex_shader)
+		f, f_ok := compile_and_load_spirv(m, pipeline.info.fragment_shader)
+		if !(v_ok && f_ok) {
+			all_ok = false
+			// continue compiling other shaders so user gets full diagnostics
+			continue
+		}
+		append(&entries, struct { name: string, vertex: []u32, fragment: []u32 }{ name = name, vertex = v, fragment = f })
+	}
+
+	if !all_ok {
+		return false
+	}
+
+	// all shaders compiled successfully: update cached SPIR-V and recreate pipelines
 	vk.DeviceWaitIdle(m.device.device)
+	for entry in entries {
+		p := &m.raster_pipelines[entry.name]
+		p.cached_spirv.vertex = entry.vertex
+		p.cached_spirv.fragment = entry.fragment
+	}
+
 	for key, &pipeline in m.raster_pipelines {
 		destroy_raster_pipeline(m.device.device, &pipeline)
 		create_raster_pipeline(m, &pipeline)
 	}
+
+	return true
 }
 
 // ────────────────────────────────────────────────────────────────
@@ -126,13 +159,19 @@ pipeline_reload_all :: proc(m: ^Pipeline_Manager) {
 create_raster_pipeline :: proc(m: ^Pipeline_Manager, pipeline: ^Raster_Pipeline) {
 	info := &pipeline.info
 
-	vertex_spv, vertex_ok := compile_and_load_spirv(m, info.vertex_shader)
-	if vertex_ok {
-		pipeline.cached_spirv.vertex = vertex_spv
+	// If cached SPIR-V is empty, try compiling the shaders. When performing
+	// a reload we pre-populate cached_spirv, so this avoids recompiling.
+	if len(pipeline.cached_spirv.vertex) == 0 {
+		vertex_spv, vertex_ok := compile_and_load_spirv(m, info.vertex_shader)
+		if vertex_ok {
+			pipeline.cached_spirv.vertex = vertex_spv
+		}
 	}
-	fragment_spv, fragment_ok := compile_and_load_spirv(m, info.fragment_shader)
-	if fragment_ok {
-		pipeline.cached_spirv.fragment = fragment_spv
+	if len(pipeline.cached_spirv.fragment) == 0 {
+		fragment_spv, fragment_ok := compile_and_load_spirv(m, info.fragment_shader)
+		if fragment_ok {
+			pipeline.cached_spirv.fragment = fragment_spv
+		}
 	}
 
 	modules: [2]vk.ShaderModule

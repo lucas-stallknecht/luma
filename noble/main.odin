@@ -11,6 +11,29 @@ device_selection_fn :: proc(idx: int, properties: vk.PhysicalDeviceProperties2) 
 	return idx == 0
 }
 
+handle_camera_inputs :: proc(win: ^Window, cam: ^Camera, dt: f32) {
+	camera_rotate(cam, window_consume_mouse_delta(win))
+
+	if win.pressed_keys[glfw.KEY_W] {
+		camera_move_forward(cam, dt)
+	}
+	if win.pressed_keys[glfw.KEY_S] {
+		camera_move_forward(cam, -dt)
+	}
+	if win.pressed_keys[glfw.KEY_D] {
+		camera_move_right(cam, dt)
+	}
+	if win.pressed_keys[glfw.KEY_A] {
+		camera_move_right(cam, -dt)
+	}
+	if win.pressed_keys[glfw.KEY_SPACE] {
+		camera_move_up(cam, dt)
+	}
+	if win.pressed_keys[glfw.KEY_LEFT_CONTROL] {
+		camera_move_up(cam, -dt)
+	}
+}
+
 main :: proc() {
 	when ODIN_DEBUG {
 		track: mem.Tracking_Allocator
@@ -27,16 +50,9 @@ main :: proc() {
 		}
 	}
 
-	if !glfw.Init() do return
-	defer glfw.Terminate()
-
-	glfw.WindowHint(glfw.CLIENT_API, glfw.NO_API)
-	window := glfw.CreateWindow(1600, 900, "Noble Renderer", nil, nil)
-	if window == nil {
-		fmt.eprintln("Failed to open GLFW window")
-		return
-	}
-	defer glfw.DestroyWindow(window)
+	window: Window
+	if !window_init(&window) do return
+	defer window_cleanup(&window)
 
 	device: Device
 	device_init(
@@ -50,7 +66,7 @@ main :: proc() {
 	)
 	defer device_cleanup(&device)
 
-	swapchain := create_swapchain(&device, window, {})
+	swapchain := create_swapchain(&device, window.glfw_window_ptr, {})
 	defer swapchain_cleanup(&swapchain)
 
 	pipeline_manager := create_pipeline_manager(&device, "shaders/", "shaders/compiled/")
@@ -63,24 +79,41 @@ main :: proc() {
 			vertex_shader = "triangle.vert",
 			fragment_shader = "triangle.frag",
 			raster = {primitive_topology = .TRIANGLE_LIST},
-			push_constant_size = 0,
+			push_constant_size = 16 * 4,
 			color_attachments = {{format = swapchain.format}},
 		},
 	)
 
-	last_reload_time: f64 = 0
-	reload_interval := 5.0
+	camera := create_camera()
+	camera_update_proj(&camera, f32(window.width) / f32(window.height))
 
-	for !glfw.WindowShouldClose(window) {
-		glfw.PollEvents()
+	last_frame_time: f64 = glfw.GetTime()
+	reload_key_prev: bool = false
+
+	for !window_should_close(&window) {
+		window_update(&window)
 		time := glfw.GetTime()
+		dt := f32(time - last_frame_time)
+		last_frame_time = time
 
-		if time - last_reload_time > reload_interval {
-			last_reload_time = time
-			pipeline_reload_all(&pipeline_manager)
+		handle_camera_inputs(&window, &camera, dt)
+		if window.pressed_keys[glfw.KEY_R] && !reload_key_prev {
+			if pipeline_reload_all(&pipeline_manager) {
+				fmt.println("Shaders successfully reloaded")
+			}
 		}
-		width, height := glfw.GetWindowSize(window)
+		reload_key_prev = window.pressed_keys[glfw.KEY_R]
 
+		if window.resized {
+			camera_update_proj(&camera, f32(window.width) / f32(window.height))
+			// TODO: resize other things
+			window.resized = false
+		}
+
+		width := window.width
+		height := window.height
+
+		// render loop
 		swapchain_image := swapchain_acquire_image(&swapchain)
 		handle, cb := command_handler_acquire(&device.command_handler)
 
@@ -115,7 +148,7 @@ main :: proc() {
 			storeOp = .STORE,
 			clearValue = {
 				color = vk.ClearColorValue {
-					float32 = [4]f32{0.0, 0.0, 0.5 + 0.5 * math.sin(t), 1.0},
+					float32 = [4]f32{0.1, 0.1, 0.1 + 0.1 * math.sin(t), 1.0},
 				},
 			},
 		}
@@ -140,6 +173,8 @@ main :: proc() {
 		vk.CmdSetViewportWithCount(cb, 1, &vp)
 		vk.CmdSetScissorWithCount(cb, 1, &scissor)
 
+		proj_view_matrix := camera.proj * camera_get_view(&camera)
+		vk.CmdPushConstants(cb, triangle_pipeline.layout, {.VERTEX, .FRAGMENT}, 0, 16 * 4, &proj_view_matrix)
 		bind_pipeline(cb, triangle_pipeline)
 		vk.CmdDraw(cb, 3, 1, 0, 0)
 
