@@ -1,0 +1,179 @@
+package noble
+
+import "core:fmt"
+import "core:math"
+import "core:mem"
+import "core:os"
+import "vendor:glfw"
+import vk "vendor:vulkan"
+
+device_selection_fn :: proc(idx: int, properties: vk.PhysicalDeviceProperties2) -> bool {
+	return idx == 0
+}
+
+main :: proc() {
+	when ODIN_DEBUG {
+		track: mem.Tracking_Allocator
+		mem.tracking_allocator_init(&track, context.allocator)
+		context.allocator = mem.tracking_allocator(&track)
+
+		defer {
+			if len(track.allocation_map) > 0 {
+				for _, entry in track.allocation_map {
+					fmt.printfln("%v leaked %v bytes", entry.location, entry.size)
+				}
+			}
+			mem.tracking_allocator_destroy(&track)
+		}
+	}
+
+	if !glfw.Init() do return
+	defer glfw.Terminate()
+
+	glfw.WindowHint(glfw.CLIENT_API, glfw.NO_API)
+	window := glfw.CreateWindow(1600, 900, "Noble Renderer", nil, nil)
+	if window == nil {
+		fmt.eprintln("Failed to open GLFW window")
+		return
+	}
+	defer glfw.DestroyWindow(window)
+
+	device: Device
+	device_init(
+		&device,
+		{
+			enable_logging = true,
+			enable_validation = true,
+			shared_types_file_path = #directory + "shared_types.odin",
+			physical_device_selection_fn = device_selection_fn,
+		},
+	)
+	defer device_cleanup(&device)
+
+	swapchain := create_swapchain(&device, window, {})
+	defer swapchain_cleanup(&swapchain)
+
+	pipeline_manager := create_pipeline_manager(&device, "shaders/", "shaders/compiled/")
+	defer pipeline_manager_cleanup(&pipeline_manager)
+
+	triangle_pipeline := pipeline_manager_add_raster(
+		&pipeline_manager,
+		{
+			name = "triangle",
+			vertex_shader = "triangle.vert",
+			fragment_shader = "triangle.frag",
+			raster = {primitive_topology = .TRIANGLE_LIST},
+			push_constant_size = 0,
+			color_attachments = {{format = swapchain.format}},
+		},
+	)
+
+	last_reload_time: f64 = 0
+	reload_interval := 5.0
+
+	for !glfw.WindowShouldClose(window) {
+		glfw.PollEvents()
+		time := glfw.GetTime()
+
+		if time - last_reload_time > reload_interval {
+			last_reload_time = time
+			pipeline_reload_all(&pipeline_manager)
+		}
+		width, height := glfw.GetWindowSize(window)
+
+		swapchain_image := swapchain_acquire_image(&swapchain)
+		handle, cb := command_handler_acquire(&device.command_handler)
+
+		rend_barrier := vk.ImageMemoryBarrier2 {
+			sType = .IMAGE_MEMORY_BARRIER_2,
+			srcStageMask = {},
+			srcAccessMask = {},
+			dstStageMask = {.COLOR_ATTACHMENT_OUTPUT},
+			dstAccessMask = {.COLOR_ATTACHMENT_WRITE},
+			oldLayout = .UNDEFINED,
+			newLayout = .COLOR_ATTACHMENT_OPTIMAL,
+			image = swapchain_image.image,
+			subresourceRange = vk.ImageSubresourceRange {
+				aspectMask = {.COLOR},
+				levelCount = 1,
+				layerCount = 1,
+			},
+		}
+		rend_dep := vk.DependencyInfo {
+			sType                   = .DEPENDENCY_INFO,
+			imageMemoryBarrierCount = 1,
+			pImageMemoryBarriers    = &rend_barrier,
+		}
+		vk.CmdPipelineBarrier2(cb, &rend_dep)
+
+		t := f32(swapchain.frame_idx) * 0.0005
+		color_attachments := vk.RenderingAttachmentInfo {
+			sType = .RENDERING_ATTACHMENT_INFO,
+			imageView = swapchain_image.view,
+			imageLayout = .COLOR_ATTACHMENT_OPTIMAL,
+			loadOp = .CLEAR,
+			storeOp = .STORE,
+			clearValue = {
+				color = vk.ClearColorValue {
+					float32 = [4]f32{0.0, 0.0, 0.5 + 0.5 * math.sin(t), 1.0},
+				},
+			},
+		}
+		render_area := vk.Rect2D {
+			extent = {width = u32(width), height = u32(height)},
+		}
+		rendering_info := vk.RenderingInfo {
+			sType                = .RENDERING_INFO,
+			renderArea           = render_area,
+			layerCount           = 1,
+			colorAttachmentCount = 1,
+			pColorAttachments    = &color_attachments,
+		}
+
+		vk.CmdBeginRendering(cb, &rendering_info)
+
+		vp := vk.Viewport {
+			width  = f32(render_area.extent.width),
+			height = f32(render_area.extent.height),
+		}
+		scissor := render_area
+		vk.CmdSetViewportWithCount(cb, 1, &vp)
+		vk.CmdSetScissorWithCount(cb, 1, &scissor)
+
+		bind_pipeline(cb, triangle_pipeline)
+		vk.CmdDraw(cb, 3, 1, 0, 0)
+
+		vk.CmdEndRendering(cb)
+
+		present_barrier := vk.ImageMemoryBarrier2 {
+			sType = .IMAGE_MEMORY_BARRIER_2,
+			srcStageMask = {.COLOR_ATTACHMENT_OUTPUT},
+			srcAccessMask = {.COLOR_ATTACHMENT_WRITE},
+			dstStageMask = {},
+			dstAccessMask = {},
+			oldLayout = .COLOR_ATTACHMENT_OPTIMAL,
+			newLayout = .PRESENT_SRC_KHR,
+			image = swapchain_image.image,
+			subresourceRange = vk.ImageSubresourceRange {
+				aspectMask = {.COLOR},
+				levelCount = 1,
+				layerCount = 1,
+			},
+		}
+		present_dep := vk.DependencyInfo {
+			sType                   = .DEPENDENCY_INFO,
+			imageMemoryBarrierCount = 1,
+			pImageMemoryBarriers    = &present_barrier,
+		}
+		vk.CmdPipelineBarrier2(cb, &present_dep)
+
+		command_handler_submit(&device.command_handler, handle, true)
+		swapchain_present(&swapchain)
+	}
+
+	vk.DeviceWaitIdle(device.device)
+	if g_enable_logging {
+		fmt.println("Shutting down")
+	}
+	return
+}
