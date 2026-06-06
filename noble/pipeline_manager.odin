@@ -59,22 +59,26 @@ Rasterizer_Info :: struct {
 	depth_bias_slope:    f32,
 }
 
+Blend_Preset :: enum {
+	Additive,
+	Alpha,
+	Pre_Multiplied,
+}
+
+Depth_Test :: struct {
+	format:             vk.Format,
+	enable_depth_write: bool,
+	compare_op:         vk.CompareOp,
+}
+
 Raster_Pipeline_Info :: struct {
 	vertex_shader:      string,
 	fragment_shader:    string,
 	color_attachments:  []struct {
 		format: vk.Format,
-		blend:  Maybe(enum {
-				Additive,
-				Alpha,
-				Pre_Multiplied,
-			}),
+		blend:  Maybe(Blend_Preset),
 	}, // up to MAX_COLOR_ATTACHMENTS
-	depth_test:         Maybe(struct {
-			format:             vk.Format,
-			enable_depth_write: bool,
-			compare_op:         vk.CompareOp,
-		}),
+	depth_test:         Maybe(Depth_Test),
 	raster:             Rasterizer_Info,
 	push_constant_size: u32,
 	name:               string, // Debug label (used by the manager as the pipeline key)
@@ -116,10 +120,10 @@ pipeline_reload_all :: proc(m: ^Pipeline_Manager) -> bool {
 	// two-phase reload: compile all shaders first. If any compilation fails,
 	// do not destroy or recreate existing pipelines
 	entries := make([dynamic]struct {
-		name: string,
-		vertex: []u32,
-		fragment: []u32,
-	}, context.temp_allocator)
+			name:     string,
+			vertex:   []u32,
+			fragment: []u32,
+		}, context.temp_allocator)
 
 	all_ok: bool = true
 	for name, &pipeline in m.raster_pipelines {
@@ -130,7 +134,11 @@ pipeline_reload_all :: proc(m: ^Pipeline_Manager) -> bool {
 			// continue compiling other shaders so user gets full diagnostics
 			continue
 		}
-		append(&entries, struct { name: string, vertex: []u32, fragment: []u32 }{ name = name, vertex = v, fragment = f })
+		append(&entries, struct {
+			name:     string,
+			vertex:   []u32,
+			fragment: []u32,
+		}{name = name, vertex = v, fragment = f})
 	}
 
 	if !all_ok {

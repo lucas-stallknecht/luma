@@ -125,7 +125,7 @@ command_handler_submit :: proc(
 		buffer_idx = handle.buffer_idx,
 		id         = ch.submission_counter,
 	}
-	vk.EndCommandBuffer(buf.buffer)
+	chk(vk.EndCommandBuffer(buf.buffer))
 
 	wait_infos := [?]vk.SemaphoreSubmitInfo {
 		{sType = .SEMAPHORE_SUBMIT_INFO, stageMask = {.ALL_COMMANDS}},

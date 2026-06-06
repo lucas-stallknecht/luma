@@ -24,7 +24,7 @@ create_camera :: proc() -> Camera {
 		move_speed = 4.0,
 		look_sensitivity = 0.2,
 		fov = 60.0,
-		position = glsl.vec3{0.0, 0.0, 2.0},
+		position = glsl.vec3{0.0, 0.0, 5.0},
 		rotation = rotation,
 		proj = glsl.mat4(1.0),
 	}
@@ -36,7 +36,7 @@ camera_update_proj :: proc(cam: ^Camera, aspect_ratio: f32) {
 		aspect_ratio,
 		cam.near,
 		cam.far,
-		true // reversed-z
+		true, // reversed-z
 	)
 	// vulkan specific
 	cam.proj[1][1] *= -1.0

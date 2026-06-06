@@ -2,8 +2,8 @@ package noble
 
 import "core:fmt"
 import "core:math"
+import "core:math/linalg/glsl"
 import "core:mem"
-import "core:os"
 import "vendor:glfw"
 import vk "vendor:vulkan"
 
@@ -72,20 +72,47 @@ main :: proc() {
 	pipeline_manager := create_pipeline_manager(&device, "shaders/", "shaders/compiled/")
 	defer pipeline_manager_cleanup(&pipeline_manager)
 
-	triangle_pipeline := pipeline_manager_add_raster(
+	Visbuffer_Push :: struct {
+		model_matrix:     glsl.mat4,
+		proj_view_matrix: glsl.mat4,
+		vertex_buffer:    vk.DeviceAddress,
+	}
+
+	visbuffer_pipeline := pipeline_manager_add_raster(
 		&pipeline_manager,
 		{
-			name = "triangle",
-			vertex_shader = "triangle.vert",
-			fragment_shader = "triangle.frag",
+			name = "visbuffer",
+			vertex_shader = "visbuffer.vert",
+			fragment_shader = "visbuffer.frag",
 			raster = {primitive_topology = .TRIANGLE_LIST},
-			push_constant_size = 16 * 4,
+			push_constant_size = size_of(Visbuffer_Push),
 			color_attachments = {{format = swapchain.format}},
+			depth_test = Depth_Test {
+				enable_depth_write = true,
+				compare_op = .LESS_OR_EQUAL,
+				format = .D32_SFLOAT,
+			},
 		},
 	)
 
 	camera := create_camera()
 	camera_update_proj(&camera, f32(window.width) / f32(window.height))
+
+	scene: Scene
+	scene_init(&scene, &device, "assets/scene.bin")
+	defer scene_cleanup(&scene, &device)
+
+	depth_image := create_image(
+		&device,
+		{
+			width = window.width,
+			height = window.height,
+			format = .D32_SFLOAT,
+			usage = {.DEPTH_STENCIL_ATTACHMENT},
+			memory = .GPU_ONLY,
+		},
+	)
+	defer destroy_image(&device, depth_image)
 
 	last_frame_time: f64 = glfw.GetTime()
 	reload_key_prev: bool = false
@@ -117,25 +144,43 @@ main :: proc() {
 		swapchain_image := swapchain_acquire_image(&swapchain)
 		handle, cb := command_handler_acquire(&device.command_handler)
 
-		rend_barrier := vk.ImageMemoryBarrier2 {
-			sType = .IMAGE_MEMORY_BARRIER_2,
-			srcStageMask = {},
-			srcAccessMask = {},
-			dstStageMask = {.COLOR_ATTACHMENT_OUTPUT},
-			dstAccessMask = {.COLOR_ATTACHMENT_WRITE},
-			oldLayout = .UNDEFINED,
-			newLayout = .COLOR_ATTACHMENT_OPTIMAL,
-			image = swapchain_image.image,
-			subresourceRange = vk.ImageSubresourceRange {
-				aspectMask = {.COLOR},
-				levelCount = 1,
-				layerCount = 1,
+		rend_barriers := [?]vk.ImageMemoryBarrier2 {
+			{
+				sType = .IMAGE_MEMORY_BARRIER_2,
+				srcStageMask = {},
+				srcAccessMask = {},
+				dstStageMask = {.COLOR_ATTACHMENT_OUTPUT},
+				dstAccessMask = {.COLOR_ATTACHMENT_WRITE},
+				oldLayout = .UNDEFINED,
+				newLayout = .COLOR_ATTACHMENT_OPTIMAL,
+				image = swapchain_image.image,
+				subresourceRange = vk.ImageSubresourceRange {
+					aspectMask = {.COLOR},
+					levelCount = 1,
+					layerCount = 1,
+				},
+			},
+			{
+				sType = .IMAGE_MEMORY_BARRIER_2,
+				srcStageMask = {},
+				srcAccessMask = {},
+				dstStageMask = {.LATE_FRAGMENT_TESTS},
+				dstAccessMask = {.DEPTH_STENCIL_ATTACHMENT_WRITE},
+				oldLayout = .UNDEFINED,
+				newLayout = .DEPTH_ATTACHMENT_OPTIMAL,
+				image = depth_image.image,
+				subresourceRange = vk.ImageSubresourceRange {
+					aspectMask = {.DEPTH},
+					levelCount = 1,
+					layerCount = 1,
+				},
 			},
 		}
+
 		rend_dep := vk.DependencyInfo {
 			sType                   = .DEPENDENCY_INFO,
-			imageMemoryBarrierCount = 1,
-			pImageMemoryBarriers    = &rend_barrier,
+			imageMemoryBarrierCount = len(rend_barriers),
+			pImageMemoryBarriers    = raw_data(&rend_barriers),
 		}
 		vk.CmdPipelineBarrier2(cb, &rend_dep)
 
@@ -152,6 +197,13 @@ main :: proc() {
 				},
 			},
 		}
+		depth_attachment := vk.RenderingAttachmentInfo {
+			sType = .RENDERING_ATTACHMENT_INFO,
+			imageView = depth_image.view,
+			imageLayout = .DEPTH_ATTACHMENT_OPTIMAL,
+			loadOp = .CLEAR,
+			clearValue = {depthStencil = {depth = 1.0}},
+		}
 		render_area := vk.Rect2D {
 			extent = {width = u32(width), height = u32(height)},
 		}
@@ -161,22 +213,37 @@ main :: proc() {
 			layerCount           = 1,
 			colorAttachmentCount = 1,
 			pColorAttachments    = &color_attachments,
+			pDepthAttachment     = &depth_attachment,
 		}
 
 		vk.CmdBeginRendering(cb, &rendering_info)
 
 		vp := vk.Viewport {
-			width  = f32(render_area.extent.width),
-			height = f32(render_area.extent.height),
+			width    = f32(render_area.extent.width),
+			height   = f32(render_area.extent.height),
+			minDepth = 0.0,
+			maxDepth = 1.0,
 		}
 		scissor := render_area
 		vk.CmdSetViewportWithCount(cb, 1, &vp)
 		vk.CmdSetScissorWithCount(cb, 1, &scissor)
 
-		proj_view_matrix := camera.proj * camera_get_view(&camera)
-		vk.CmdPushConstants(cb, triangle_pipeline.layout, {.VERTEX, .FRAGMENT}, 0, 16 * 4, &proj_view_matrix)
-		bind_pipeline(cb, triangle_pipeline)
-		vk.CmdDraw(cb, 3, 1, 0, 0)
+		push := Visbuffer_Push {
+			model_matrix     = glsl.identity(glsl.mat4),
+			proj_view_matrix = camera.proj * camera_get_view(&camera),
+			vertex_buffer    = scene.position_buffer.device_address,
+		}
+		vk.CmdPushConstants(
+			cb,
+			visbuffer_pipeline.layout,
+			{.VERTEX, .FRAGMENT},
+			0,
+			size_of(Visbuffer_Push),
+			&push,
+		)
+		bind_pipeline(cb, visbuffer_pipeline)
+		vk.CmdBindIndexBuffer(cb, scene.index_buffer.buffer, 0, .UINT32)
+		vk.CmdDrawIndexed(cb, scene.index_count, 1, 0, 0, 0)
 
 		vk.CmdEndRendering(cb)
 

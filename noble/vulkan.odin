@@ -1,5 +1,6 @@
 package noble
 
+import "base:intrinsics"
 import "core:fmt"
 import "vendor:glfw"
 import vk "vendor:vulkan"
@@ -144,11 +145,9 @@ device_init :: proc(d: ^Device, desc: Device_Desc) {
 		for i in 0 ..< queue_family_count {
 			if vk.QueueFlag.GRAPHICS in queue_families[i].queueFlags {
 				d.queues.graphics_family_idx = i
-				break
 			}
 			if vk.QueueFlag.COMPUTE in queue_families[i].queueFlags {
 				d.queues.compute_family_idx = i
-				break
 			}
 		}
 	}
@@ -165,7 +164,7 @@ device_init :: proc(d: ^Device, desc: Device_Desc) {
 			},
 			{
 				sType = .DEVICE_QUEUE_CREATE_INFO,
-				queueFamilyIndex = d.queues.graphics_family_idx,
+				queueFamilyIndex = d.queues.compute_family_idx,
 				queueCount = 1,
 				pQueuePriorities = &queue_priority,
 			},
@@ -195,6 +194,7 @@ device_init :: proc(d: ^Device, desc: Device_Desc) {
 		vk10_features := vk.PhysicalDeviceFeatures {
 			samplerAnisotropy = true,
 			shaderInt64       = true,
+			geometryShader    = true,
 		}
 
 		device_ci := vk.DeviceCreateInfo {
@@ -210,7 +210,7 @@ device_init :: proc(d: ^Device, desc: Device_Desc) {
 		vk.load_proc_addresses_device(d.device)
 		if vk.BeginCommandBuffer == nil do fmt.panicf("[Device] Failed to load device functions")
 		vk.GetDeviceQueue(d.device, d.queues.compute_family_idx, 0, &d.queues.compute)
-		vk.GetDeviceQueue(d.device, d.queues.compute_family_idx, 0, &d.queues.graphics)
+		vk.GetDeviceQueue(d.device, d.queues.graphics_family_idx, 0, &d.queues.graphics)
 	}
 
 	command_handler_init(
@@ -520,6 +520,185 @@ create_pipeline_manager :: proc(
 	}
 }
 
+Memory_Preset :: enum {
+	GPU_ONLY,
+	CPU_UPLOAD,
+	CPU_READBACK,
+}
+
+Buffer :: struct {
+	buffer:         vk.Buffer,
+	memory:         vk.DeviceMemory,
+	device_address: vk.DeviceAddress,
+}
+
+Buffer_Create_Desc :: struct {
+	size:   vk.DeviceSize,
+	usage:  vk.BufferUsageFlags,
+	memory: Memory_Preset,
+}
+
+create_buffer :: proc(device: ^Device, desc: Buffer_Create_Desc) -> Buffer {
+	out: Buffer
+
+	buffer_ci := vk.BufferCreateInfo {
+		sType       = .BUFFER_CREATE_INFO,
+		size        = desc.size,
+		usage       = desc.usage,
+		sharingMode = .EXCLUSIVE,
+	}
+	chk(vk.CreateBuffer(device.device, &buffer_ci, nil, &out.buffer))
+
+	mem_requirements: vk.MemoryRequirements
+	vk.GetBufferMemoryRequirements(device.device, out.buffer, &mem_requirements)
+
+	alloc_info := vk.MemoryAllocateInfo {
+		sType           = .MEMORY_ALLOCATE_INFO,
+		allocationSize  = mem_requirements.size,
+		memoryTypeIndex = find_memory_type(
+			device,
+			mem_requirements.memoryTypeBits,
+			get_memory_flags(desc.memory),
+		),
+	}
+	if .SHADER_DEVICE_ADDRESS in desc.usage {
+		alloc_info.pNext = &vk.MemoryAllocateFlagsInfo {
+			sType = .MEMORY_ALLOCATE_FLAGS_INFO,
+			flags = {.DEVICE_ADDRESS},
+		}
+	}
+
+	chk(vk.AllocateMemory(device.device, &alloc_info, nil, &out.memory))
+	vk.BindBufferMemory(device.device, out.buffer, out.memory, 0)
+
+	if .SHADER_DEVICE_ADDRESS in desc.usage {
+		device_address_info := vk.BufferDeviceAddressInfo {
+			sType  = .BUFFER_DEVICE_ADDRESS_INFO,
+			buffer = out.buffer,
+		}
+		out.device_address = vk.GetBufferDeviceAddress(device.device, &device_address_info)
+	}
+
+
+	return out
+}
+
+destroy_buffer :: proc(device: ^Device, buffer: ^Buffer) {
+	if buffer.buffer != 0 {
+		vk.DestroyBuffer(device.device, buffer.buffer, nil)
+	}
+	if buffer.memory != 0 {
+		vk.FreeMemory(device.device, buffer.memory, nil)
+	}
+}
+
+create_and_upload_buffer :: proc(
+	device: ^Device,
+	temp_pool: ^[dynamic]Buffer,
+	cb: vk.CommandBuffer,
+	data: rawptr,
+	desc: Buffer_Create_Desc,
+) -> Buffer {
+	desc_copy := desc
+	desc_copy.usage += {.TRANSFER_DST}
+	out := create_buffer(device, desc_copy)
+
+	staging := create_buffer(
+		device,
+		{size = desc.size, usage = {.TRANSFER_SRC}, memory = .CPU_UPLOAD},
+	)
+	// keep staging alive by pushing it into the caller-provided temp pool
+	append(temp_pool, staging)
+
+	mapped: rawptr
+	vk.MapMemory(device.device, staging.memory, 0, desc.size, {}, &mapped)
+	intrinsics.mem_copy(mapped, data, desc.size)
+	vk.UnmapMemory(device.device, staging.memory)
+
+	copy_info := vk.BufferCopy {
+		size      = desc.size,
+		srcOffset = 0,
+		dstOffset = 0,
+	}
+	vk.CmdCopyBuffer(cb, staging.buffer, out.buffer, 1, &copy_info)
+
+	return out
+}
+
+Image :: struct {
+	image:  vk.Image,
+	view:   vk.ImageView,
+	memory: vk.DeviceMemory,
+}
+
+Image_Create_Desc :: struct {
+	width:  u32,
+	height: u32,
+	format: vk.Format,
+	usage:  vk.ImageUsageFlags,
+	memory: Memory_Preset,
+}
+
+create_image :: proc(device: ^Device, desc: Image_Create_Desc) -> Image {
+	out: Image
+
+	image_ci := vk.ImageCreateInfo {
+		sType       = .IMAGE_CREATE_INFO,
+		imageType   = .D2,
+		extent      = {desc.width, desc.height, 1},
+		mipLevels   = 1,
+		arrayLayers = 1,
+		usage       = desc.usage,
+		format      = desc.format,
+		tiling      = .OPTIMAL,
+		sharingMode = .EXCLUSIVE,
+		samples     = {._1},
+	}
+	chk(vk.CreateImage(device.device, &image_ci, nil, &out.image))
+
+	mem_requirements: vk.MemoryRequirements
+	vk.GetImageMemoryRequirements(device.device, out.image, &mem_requirements)
+
+	alloc_info := vk.MemoryAllocateInfo {
+		sType           = .MEMORY_ALLOCATE_INFO,
+		allocationSize  = mem_requirements.size,
+		memoryTypeIndex = find_memory_type(
+			device,
+			mem_requirements.memoryTypeBits,
+			get_memory_flags(desc.memory),
+		),
+	}
+	chk(vk.AllocateMemory(device.device, &alloc_info, nil, &out.memory))
+	vk.BindImageMemory(device.device, out.image, out.memory, 0)
+
+	view_ci := vk.ImageViewCreateInfo {
+		sType = .IMAGE_VIEW_CREATE_INFO,
+		image = out.image,
+		viewType = .D2,
+		format = desc.format,
+		subresourceRange = {
+			layerCount = 1,
+			levelCount = 1,
+			aspectMask = ({.DEPTH} if desc.format == vk.Format.D32_SFLOAT || desc.format == vk.Format.D16_UNORM else {.COLOR}),
+		},
+	}
+	chk(vk.CreateImageView(device.device, &view_ci, nil, &out.view))
+
+	return out
+}
+
+destroy_image :: proc(device: ^Device, image: Image) {
+	if image.view != 0 {
+		vk.DestroyImageView(device.device, image.view, nil)
+	}
+	if image.image != 0 {
+		vk.DestroyImage(device.device, image.image, nil)
+	}
+	if image.memory != 0 {
+		vk.FreeMemory(device.device, image.memory, nil)
+	}
+}
+
 // ────────────────────────────────────────────────────────────────
 // Command helpers
 
@@ -570,4 +749,37 @@ choose_present_mode :: proc(
 		}
 	}
 	return .FIFO, false
+}
+
+@(private = "file")
+find_memory_type :: proc(
+	device: ^Device,
+	type_filter: u32,
+	properties: vk.MemoryPropertyFlags,
+) -> u32 {
+	mem_properties: vk.PhysicalDeviceMemoryProperties
+	vk.GetPhysicalDeviceMemoryProperties(device.physical_device, &mem_properties)
+
+	for i in 0 ..< mem_properties.memoryTypeCount {
+		if (type_filter & (1 << i) != 0) &&
+		   (properties & mem_properties.memoryTypes[i].propertyFlags) == properties { 	// memory type is suitable
+			return i
+		}
+	}
+	fmt.panicf("[Device] Failed to find suitable memory type")
+}
+
+@(private = "file")
+get_memory_flags :: proc(p: Memory_Preset) -> vk.MemoryPropertyFlags {
+	switch p {
+	case .GPU_ONLY:
+		return {.DEVICE_LOCAL}
+
+	case .CPU_UPLOAD:
+		return {.HOST_VISIBLE, .HOST_COHERENT}
+
+	case .CPU_READBACK:
+		return {.HOST_VISIBLE, .HOST_COHERENT}
+	}
+	return {.DEVICE_LOCAL}
 }
