@@ -195,6 +195,7 @@ device_init :: proc(d: ^Device, desc: Device_Desc) {
 			samplerAnisotropy = true,
 			shaderInt64       = true,
 			geometryShader    = true,
+			multiDrawIndirect = true
 		}
 
 		device_ci := vk.DeviceCreateInfo {

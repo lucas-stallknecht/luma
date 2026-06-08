@@ -73,9 +73,9 @@ main :: proc() {
 	defer pipeline_manager_cleanup(&pipeline_manager)
 
 	Visbuffer_Push :: struct {
-		model_matrix:     glsl.mat4,
 		proj_view_matrix: glsl.mat4,
 		vertex_buffer:    vk.DeviceAddress,
+		draw_data_buffer: vk.DeviceAddress,
 	}
 
 	visbuffer_pipeline := pipeline_manager_add_raster(
@@ -99,7 +99,7 @@ main :: proc() {
 	camera_update_proj(&camera, f32(window.width) / f32(window.height))
 
 	scene: Scene
-	scene_init(&scene, &device, "assets/scene.bin")
+	scene_init(&scene, &device, "assets/crytek_sponza.bin")
 	defer scene_cleanup(&scene, &device)
 
 	depth_image := create_image(
@@ -229,9 +229,9 @@ main :: proc() {
 		vk.CmdSetScissorWithCount(cb, 1, &scissor)
 
 		push := Visbuffer_Push {
-			model_matrix     = glsl.identity(glsl.mat4),
 			proj_view_matrix = camera.proj * camera_get_view(&camera),
 			vertex_buffer    = scene.position_buffer.device_address,
+			draw_data_buffer = scene.draw_data_buffer.device_address,
 		}
 		vk.CmdPushConstants(
 			cb,
@@ -243,7 +243,13 @@ main :: proc() {
 		)
 		bind_pipeline(cb, visbuffer_pipeline)
 		vk.CmdBindIndexBuffer(cb, scene.index_buffer.buffer, 0, .UINT32)
-		vk.CmdDrawIndexed(cb, scene.index_count, 1, 0, 0, 0)
+		vk.CmdDrawIndexedIndirect(
+			cb,
+			scene.draw_command_buffer.buffer,
+			0,
+			scene.draw_count,
+			size_of(vk.DrawIndexedIndirectCommand),
+		)
 
 		vk.CmdEndRendering(cb)
 

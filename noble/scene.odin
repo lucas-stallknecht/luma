@@ -8,10 +8,12 @@ import vk "vendor:vulkan"
 
 
 Scene :: struct {
-	vertex_count:    u32,
-	index_count:     u32,
-	index_buffer:    Buffer,
-	position_buffer: Buffer,
+	triangle_count:      u32,
+	draw_count:          u32,
+	index_buffer:        Buffer,
+	position_buffer:     Buffer,
+	draw_data_buffer:    Buffer,
+	draw_command_buffer: Buffer,
 }
 
 Header :: struct {
@@ -33,8 +35,14 @@ Material :: struct {
 	color: glsl.vec3,
 }
 
+Draw_Data :: struct #align (16) {
+	transform:     glsl.mat4,
+	material_idx:  u32,
+	triangle_base: u32,
+}
+
 Renderable :: struct {
-	transform:    glsl.mat4x4,
+	transform:    [16]f32,
 	material_idx: u32,
 	index_offset: u32,
 	index_count:  u32,
@@ -50,10 +58,8 @@ scene_init :: proc(scene: ^Scene, device: ^Device, path: string) {
 	}
 
 	header := (^Header)(raw_data(data))^
-	scene.vertex_count = header.positions_size / (3 * size_of(f32))
-	scene.index_count = header.indices_size / size_of(u32)
-	fmt.println("- vertex count    :", scene.vertex_count)
-	fmt.println("- indices count    :", scene.index_count)
+	scene.triangle_count = (header.indices_size / size_of(u32)) / 3
+	fmt.println("- triangle count :", scene.triangle_count)
 
 	handle, cb := command_handler_acquire(&device.command_handler)
 
@@ -90,6 +96,63 @@ scene_init :: proc(scene: ^Scene, device: ^Device, path: string) {
 		},
 	)
 
+	// renderables
+	renderables_bytes := data[header.renderables_offset:header.renderables_offset +
+	header.renderables_size]
+	renderables := ([^]Renderable)(raw_data(renderables_bytes))
+
+	renderable_count := header.renderables_size / size_of(Renderable)
+	draw_data := make([]Draw_Data, renderable_count)
+	draw_commands := make([]vk.DrawIndexedIndirectCommand, renderable_count)
+
+	triangle_base: u32 = 0
+	for i in 0 ..< renderable_count {
+		rend := renderables[i]
+		draw_data[i] = {
+			transform     = make_transform(rend.transform),
+			material_idx  = i,
+			triangle_base = triangle_base,
+		}
+		draw_commands[i] = vk.DrawIndexedIndirectCommand {
+			firstInstance = 0,
+			instanceCount = 1,
+			firstIndex    = rend.index_offset,
+			indexCount    = rend.index_count,
+			vertexOffset  = 0,
+		}
+
+		triangle_base += rend.index_count / 3
+	}
+	defer {
+		delete(draw_data)
+		delete(draw_commands)
+	}
+
+	scene.draw_data_buffer = create_and_upload_buffer(
+		device,
+		&temp_pool,
+		cb,
+		raw_data(draw_data),
+		{
+			size = vk.DeviceSize(len(draw_data) * size_of(Draw_Data)),
+			usage = {.STORAGE_BUFFER, .SHADER_DEVICE_ADDRESS},
+			memory = .GPU_ONLY,
+		},
+	)
+	scene.draw_command_buffer = create_and_upload_buffer(
+		device,
+		&temp_pool,
+		cb,
+		raw_data(draw_commands),
+		{
+			size = vk.DeviceSize(len(draw_commands) * size_of(vk.DrawIndexedIndirectCommand)),
+			usage = {.INDIRECT_BUFFER},
+			memory = .GPU_ONLY,
+		},
+	)
+	scene.draw_count = u32(len(draw_commands))
+	fmt.println("- draw count     :", scene.draw_count)
+
 	command_handler_submit(&device.command_handler, handle, false)
 	command_handler_wait(&device.command_handler, handle)
 
@@ -102,4 +165,28 @@ scene_init :: proc(scene: ^Scene, device: ^Device, path: string) {
 scene_cleanup :: proc(scene: ^Scene, device: ^Device) {
 	destroy_buffer(device, &scene.position_buffer)
 	destroy_buffer(device, &scene.index_buffer)
+	destroy_buffer(device, &scene.draw_data_buffer)
+	destroy_buffer(device, &scene.draw_command_buffer)
+}
+
+@(private = "file")
+make_transform :: proc(t: [16]f32) -> glsl.mat4 {
+	return {
+		t[0],
+		t[1],
+		t[2],
+		t[3],
+		t[4],
+		t[5],
+		t[6],
+		t[7],
+		t[8],
+		t[9],
+		t[10],
+		t[11],
+		t[12],
+		t[13],
+		t[14],
+		t[15],
+	}
 }

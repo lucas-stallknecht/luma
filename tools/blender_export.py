@@ -7,6 +7,15 @@ import numpy as np
 HEADER_STRUCT = struct.Struct("12I")
 MATERIAL_STRUCT = struct.Struct("4f")
 RENDERABLE_STRUCT = struct.Struct("16f3I")
+axis_fix = np.array(
+    [
+        [1, 0, 0, 0],
+        [0, 0, 1, 0],
+        [0, -1, 0, 0],
+        [0, 0, 0, 1],
+    ],
+    dtype=np.float32,
+)
 
 print("\n", str(datetime.datetime.now()))
 
@@ -51,7 +60,8 @@ for obj_idx, obj in enumerate(bpy.context.selected_objects):
     uv_layer = mesh.uv_layers.active.data if mesh.uv_layers else None
 
     # object transform
-    transform = np.array(obj.matrix_world, dtype=np.float32)
+    # transform = np.array(obj.matrix_world, dtype=np.float32)
+    transform = axis_fix @ np.array(obj.matrix_world, dtype=np.float32)
 
     # per-object grouping: (material_idx) -> indices
     submesh_map = {}
