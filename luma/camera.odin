@@ -1,4 +1,4 @@
-package noble
+package luma
 
 import "core:math"
 import la "core:math/linalg"

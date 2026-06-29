@@ -1,7 +1,6 @@
-package noble
+package luma
 
 import "core:fmt"
-import "core:math"
 import "core:math/linalg/glsl"
 import "core:mem"
 import "vendor:glfw"
@@ -58,7 +57,6 @@ main :: proc() {
 	device_init(
 		&device,
 		{
-			enable_logging = true,
 			enable_validation = true,
 			shared_types_file_path = #directory + "shared_types.odin",
 			physical_device_selection_fn = device_selection_fn,
@@ -86,12 +84,27 @@ main :: proc() {
 			fragment_shader = "visbuffer.frag",
 			raster = {primitive_topology = .TRIANGLE_LIST},
 			push_constant_size = size_of(Visbuffer_Push),
-			color_attachments = {{format = swapchain.format}},
+			color_attachments = {{format = .R32_UINT}},
 			depth_test = Depth_Test {
 				enable_depth_write = true,
 				compare_op = .LESS_OR_EQUAL,
 				format = .D32_SFLOAT,
 			},
+		},
+	)
+
+	Present_Push :: struct {
+		visbuffer_idx: u32,
+	}
+	present_pipeline := pipeline_manager_add_raster(
+		&pipeline_manager,
+		{
+			name = "visbuffer_present",
+			vertex_shader = "present.vert",
+			fragment_shader = "present.frag",
+			raster = {primitive_topology = .TRIANGLE_LIST},
+			push_constant_size = size_of(Present_Push),
+			color_attachments = {{format = swapchain.format}},
 		},
 	)
 
@@ -102,6 +115,17 @@ main :: proc() {
 	scene_init(&scene, &device, "assets/crytek_sponza.bin")
 	defer scene_cleanup(&scene, &device)
 
+	visbuffer := create_image(
+		&device,
+		{
+			width = window.width,
+			height = window.height,
+			format = .R32_UINT,
+			usage = {.COLOR_ATTACHMENT, .TRANSFER_SRC, .STORAGE},
+			memory = .GPU_ONLY,
+			register_bindless = true,
+		},
+	)
 	depth_image := create_image(
 		&device,
 		{
@@ -112,7 +136,27 @@ main :: proc() {
 			memory = .GPU_ONLY,
 		},
 	)
-	defer destroy_image(&device, depth_image)
+	default_sampler: vk.Sampler
+	sampler_ci := vk.SamplerCreateInfo {
+		sType        = .SAMPLER_CREATE_INFO,
+		magFilter    = .NEAREST,
+		minFilter    = .NEAREST,
+		addressModeU = .CLAMP_TO_EDGE,
+		addressModeV = .CLAMP_TO_EDGE,
+		addressModeW = .CLAMP_TO_EDGE,
+		mipLodBias   = 0.0,
+		minLod       = 0.0,
+		maxLod       = 0.0,
+		borderColor  = .INT_OPAQUE_BLACK,
+	}
+	chk(vk.CreateSampler(device.device, &sampler_ci, nil, &default_sampler))
+	bindless_register_sampler(&device, default_sampler)
+
+	defer {
+		if default_sampler != 0 {vk.DestroySampler(device.device, default_sampler, nil)}
+		destroy_image(&device, visbuffer)
+		destroy_image(&device, depth_image)
+	}
 
 	last_frame_time: f64 = glfw.GetTime()
 	reload_key_prev: bool = false
@@ -153,7 +197,7 @@ main :: proc() {
 				dstAccessMask = {.COLOR_ATTACHMENT_WRITE},
 				oldLayout = .UNDEFINED,
 				newLayout = .COLOR_ATTACHMENT_OPTIMAL,
-				image = swapchain_image.image,
+				image = visbuffer.image,
 				subresourceRange = vk.ImageSubresourceRange {
 					aspectMask = {.COLOR},
 					levelCount = 1,
@@ -187,15 +231,11 @@ main :: proc() {
 		t := f32(swapchain.frame_idx) * 0.0005
 		color_attachments := vk.RenderingAttachmentInfo {
 			sType = .RENDERING_ATTACHMENT_INFO,
-			imageView = swapchain_image.view,
+			imageView = visbuffer.view,
 			imageLayout = .COLOR_ATTACHMENT_OPTIMAL,
 			loadOp = .CLEAR,
 			storeOp = .STORE,
-			clearValue = {
-				color = vk.ClearColorValue {
-					float32 = [4]f32{0.1, 0.1, 0.1 + 0.1 * math.sin(t), 1.0},
-				},
-			},
+			clearValue = {color = vk.ClearColorValue{uint32 = [4]u32{}}},
 		}
 		depth_attachment := vk.RenderingAttachmentInfo {
 			sType = .RENDERING_ATTACHMENT_INFO,
@@ -253,6 +293,81 @@ main :: proc() {
 
 		vk.CmdEndRendering(cb)
 
+		trans_barriers := [?]vk.ImageMemoryBarrier2 {
+			{
+				sType = .IMAGE_MEMORY_BARRIER_2,
+				srcStageMask = {.COLOR_ATTACHMENT_OUTPUT},
+				srcAccessMask = {.COLOR_ATTACHMENT_WRITE},
+				dstStageMask = {.FRAGMENT_SHADER},
+				dstAccessMask = {.SHADER_STORAGE_READ},
+				oldLayout = .COLOR_ATTACHMENT_OPTIMAL,
+				newLayout = .GENERAL,
+				image = visbuffer.image,
+				subresourceRange = vk.ImageSubresourceRange {
+					aspectMask = {.COLOR},
+					levelCount = 1,
+					layerCount = 1,
+				},
+			},
+			{
+				sType = .IMAGE_MEMORY_BARRIER_2,
+				srcStageMask = {},
+				srcAccessMask = {},
+				dstStageMask = {.COLOR_ATTACHMENT_OUTPUT},
+				dstAccessMask = {.COLOR_ATTACHMENT_WRITE},
+				oldLayout = .UNDEFINED,
+				newLayout = .COLOR_ATTACHMENT_OPTIMAL,
+				image = swapchain_image.image,
+				subresourceRange = vk.ImageSubresourceRange {
+					aspectMask = {.COLOR},
+					levelCount = 1,
+					layerCount = 1,
+				},
+			},
+		}
+		trans_dep := vk.DependencyInfo {
+			sType                   = .DEPENDENCY_INFO,
+			imageMemoryBarrierCount = len(trans_barriers),
+			pImageMemoryBarriers    = raw_data(&trans_barriers),
+		}
+		vk.CmdPipelineBarrier2(cb, &trans_dep)
+
+		// Render a fullscreen triangle that samples the visbuffer
+		swap_color_attachments := vk.RenderingAttachmentInfo {
+			sType = .RENDERING_ATTACHMENT_INFO,
+			imageView = swapchain_image.view,
+			imageLayout = .COLOR_ATTACHMENT_OPTIMAL,
+			loadOp = .CLEAR,
+			storeOp = .STORE,
+			clearValue = {color = vk.ClearColorValue{float32 = [4]f32{0.0, 0.0, 0.0, 0.0}}},
+		}
+		rendering_info2 := vk.RenderingInfo {
+			sType                = .RENDERING_INFO,
+			renderArea           = render_area,
+			layerCount           = 1,
+			colorAttachmentCount = 1,
+			pColorAttachments    = &swap_color_attachments,
+		}
+		vk.CmdBeginRendering(cb, &rendering_info2)
+		vk.CmdSetViewportWithCount(cb, 1, &vp)
+		vk.CmdSetScissorWithCount(cb, 1, &scissor)
+
+		present_pc := Present_Push {
+			visbuffer_idx = visbuffer.bindless_index,
+		}
+		vk.CmdPushConstants(
+			cb,
+			present_pipeline.layout,
+			{.VERTEX, .FRAGMENT},
+			0,
+			size_of(Present_Push),
+			&present_pc,
+		)
+		bind_pipeline(cb, present_pipeline)
+		vk.CmdDraw(cb, 3, 1, 0, 0)
+		vk.CmdEndRendering(cb)
+
+		// Transition to PRESENT
 		present_barrier := vk.ImageMemoryBarrier2 {
 			sType = .IMAGE_MEMORY_BARRIER_2,
 			srcStageMask = {.COLOR_ATTACHMENT_OUTPUT},
@@ -280,8 +395,6 @@ main :: proc() {
 	}
 
 	vk.DeviceWaitIdle(device.device)
-	if g_enable_logging {
-		fmt.println("Shutting down")
-	}
+	fmt.println("Shutting down")
 	return
 }

@@ -1,4 +1,4 @@
-package noble
+package luma
 
 import "core:fmt"
 import "core:math/linalg/glsl"
@@ -38,7 +38,7 @@ window_init :: proc(win: ^Window, width: u32 = 1600, height: u32 = 900) -> bool 
 	win.glfw_window_ptr = glfw.CreateWindow(
 		i32(win.width),
 		i32(win.height),
-		"Noble Renderer",
+		"Luma Renderer",
 		nil,
 		nil,
 	)

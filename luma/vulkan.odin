@@ -1,13 +1,9 @@
-package noble
+package luma
 
 import "base:intrinsics"
 import "core:fmt"
 import "vendor:glfw"
 import vk "vendor:vulkan"
-
-// Globals set by device_init
-g_enable_logging: bool
-
 
 chk :: proc(result: vk.Result, location := #caller_location) {
 	if result != .SUCCESS {
@@ -33,9 +29,22 @@ Device :: struct {
 	descriptor_layout:       vk.DescriptorSetLayout,
 	descriptor_set:          vk.DescriptorSet,
 	command_handler:         Command_Handler,
+	bindless_next:           struct {
+		sampler:       u32,
+		storage_u32:   u32,
+		storage_rgba8: u32,
+	},
 }
 
 MAX_BINDLESS_IMAGES :: 1000
+MAX_SAMPLERS :: 20
+
+// glsl requires a format layout qualifier on a storage image that's read
+// (not just written)... SO each concrete format gets its own bindless array
+// see shaders/luma.glsl for the matching glsl side
+BINDLESS_SAMPLER_BINDING :: 0
+BINDLESS_STORAGE_U32_BINDING :: 1
+BINDLESS_STORAGE_RGBA8_BINDING :: 2
 DEFAULT_PHYSICAL_DEVICE_SELECTION_FN :: proc(
 	idx: int,
 	properties: vk.PhysicalDeviceProperties2,
@@ -45,7 +54,6 @@ DEFAULT_PHYSICAL_DEVICE_SELECTION_FN :: proc(
 
 
 Device_Desc :: struct {
-	enable_logging:               bool,
 	enable_validation:            bool,
 	shared_types_file_path:       string,
 	physical_device_selection_fn: Maybe(
@@ -54,7 +62,6 @@ Device_Desc :: struct {
 }
 
 device_init :: proc(d: ^Device, desc: Device_Desc) {
-	g_enable_logging = desc.enable_logging
 	// instance
 	{
 		vk.load_proc_addresses_global(rawptr(glfw.GetInstanceProcAddress))
@@ -77,9 +84,7 @@ device_init :: proc(d: ^Device, desc: Device_Desc) {
 			instance_ci.enabledLayerCount = 0
 		}
 
-		if desc.enable_logging {
-			fmt.println("[Device] Instance extensions", extensions[:])
-		}
+		fmt.println("[Device] Instance extensions", extensions[:])
 		instance_ci.enabledExtensionCount = u32(len(extensions))
 		instance_ci.ppEnabledExtensionNames = raw_data(extensions)
 
@@ -116,12 +121,7 @@ device_init :: proc(d: ^Device, desc: Device_Desc) {
 			if !selection_fn(i, device_properties) do continue
 
 			d.physical_device = pd
-			if desc.enable_logging {
-				fmt.printfln(
-					"[Device] Selected device: %s",
-					device_properties.properties.deviceName,
-				)
-			}
+			fmt.printfln("[Device] Selected device: %s", device_properties.properties.deviceName)
 			break
 		}
 		if d.physical_device == nil do fmt.panicf("[Device] No suitable physical device selected")
@@ -177,13 +177,20 @@ device_init :: proc(d: ^Device, desc: Device_Desc) {
 			shaderDrawParameters = true,
 		}
 		vk12_features := vk.PhysicalDeviceVulkan12Features {
-			sType                                    = .PHYSICAL_DEVICE_VULKAN_1_2_FEATURES,
-			pNext                                    = &vk11_features,
-			descriptorIndexing                       = true,
-			descriptorBindingVariableDescriptorCount = true,
-			runtimeDescriptorArray                   = true,
-			bufferDeviceAddress                      = true,
-			timelineSemaphore                        = true,
+			sType                                        = .PHYSICAL_DEVICE_VULKAN_1_2_FEATURES,
+			pNext                                        = &vk11_features,
+			bufferDeviceAddress                          = true,
+			timelineSemaphore                            = true,
+			descriptorIndexing                           = true,
+			descriptorBindingVariableDescriptorCount     = true,
+			runtimeDescriptorArray                       = true,
+			shaderSampledImageArrayNonUniformIndexing    = true,
+			shaderStorageImageArrayNonUniformIndexing    = true,
+			shaderUniformBufferArrayNonUniformIndexing   = true,
+			descriptorBindingPartiallyBound              = true,
+			descriptorBindingUpdateUnusedWhilePending    = true,
+			descriptorBindingSampledImageUpdateAfterBind = true,
+			descriptorBindingStorageImageUpdateAfterBind = true,
 		}
 		vk13_features := vk.PhysicalDeviceVulkan13Features {
 			sType            = .PHYSICAL_DEVICE_VULKAN_1_3_FEATURES,
@@ -192,10 +199,12 @@ device_init :: proc(d: ^Device, desc: Device_Desc) {
 			dynamicRendering = true,
 		}
 		vk10_features := vk.PhysicalDeviceFeatures {
-			samplerAnisotropy = true,
-			shaderInt64       = true,
-			geometryShader    = true,
-			multiDrawIndirect = true
+			samplerAnisotropy                    = true,
+			geometryShader                       = true,
+			multiDrawIndirect                    = true,
+			shaderStorageImageReadWithoutFormat  = true,
+			shaderStorageImageWriteWithoutFormat = true,
+			fragmentStoresAndAtomics             = true,
 		}
 
 		device_ci := vk.DeviceCreateInfo {
@@ -226,32 +235,55 @@ device_init :: proc(d: ^Device, desc: Device_Desc) {
 	// bindless Descriptors
 	{
 		desc_pool_sizes := [?]vk.DescriptorPoolSize {
-			{type = .SAMPLED_IMAGE, descriptorCount = MAX_BINDLESS_IMAGES},
+			{type = .SAMPLER, descriptorCount = MAX_SAMPLERS},
+			{type = .STORAGE_IMAGE, descriptorCount = MAX_BINDLESS_IMAGES * 2},
 		}
 		desc_pool_ci := vk.DescriptorPoolCreateInfo {
 			sType         = .DESCRIPTOR_POOL_CREATE_INFO,
 			maxSets       = 3,
 			poolSizeCount = len(desc_pool_sizes),
 			pPoolSizes    = raw_data(&desc_pool_sizes),
+			flags         = {.UPDATE_AFTER_BIND},
 		}
 		chk(vk.CreateDescriptorPool(d.device, &desc_pool_ci, nil, &d.descriptor_pool))
 
-		desc_variable_flags := vk.DescriptorBindingFlags{.VARIABLE_DESCRIPTOR_COUNT}
+		common_binding_flags := vk.DescriptorBindingFlags{.UPDATE_AFTER_BIND, .PARTIALLY_BOUND}
+		desc_binding_flags_arr := [?]vk.DescriptorBindingFlags {
+			common_binding_flags,
+			common_binding_flags,
+			common_binding_flags | {.VARIABLE_DESCRIPTOR_COUNT},
+		}
 		desc_binding_flags := vk.DescriptorSetLayoutBindingFlagsCreateInfo {
 			sType         = .DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO,
-			bindingCount  = 1,
-			pBindingFlags = &desc_variable_flags,
+			bindingCount  = len(desc_binding_flags_arr),
+			pBindingFlags = raw_data(&desc_binding_flags_arr),
 		}
-		desc_layout_bindings := vk.DescriptorSetLayoutBinding {
-			descriptorType  = .SAMPLED_IMAGE,
-			descriptorCount = MAX_BINDLESS_IMAGES,
-			stageFlags      = {.VERTEX, .FRAGMENT, .COMPUTE},
+		desc_layout_bindings := [?]vk.DescriptorSetLayoutBinding {
+			{
+				binding = BINDLESS_SAMPLER_BINDING,
+				descriptorType = .SAMPLER,
+				descriptorCount = MAX_SAMPLERS,
+				stageFlags = {.VERTEX, .FRAGMENT, .COMPUTE},
+			},
+			{
+				binding = BINDLESS_STORAGE_U32_BINDING,
+				descriptorType = .STORAGE_IMAGE,
+				descriptorCount = MAX_BINDLESS_IMAGES,
+				stageFlags = {.VERTEX, .FRAGMENT, .COMPUTE},
+			},
+			{
+				binding = BINDLESS_STORAGE_RGBA8_BINDING,
+				descriptorType = .STORAGE_IMAGE,
+				descriptorCount = MAX_BINDLESS_IMAGES,
+				stageFlags = {.VERTEX, .FRAGMENT, .COMPUTE},
+			},
 		}
 		desc_layout_ci := vk.DescriptorSetLayoutCreateInfo {
 			sType        = .DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
 			pNext        = &desc_binding_flags,
-			bindingCount = 1,
-			pBindings    = &desc_layout_bindings,
+			flags        = {.UPDATE_AFTER_BIND_POOL},
+			bindingCount = len(desc_layout_bindings),
+			pBindings    = raw_data(&desc_layout_bindings),
 		}
 		chk(vk.CreateDescriptorSetLayout(d.device, &desc_layout_ci, nil, &d.descriptor_layout))
 
@@ -376,7 +408,7 @@ create_swapchain :: proc(
 			desc.preferred_surface_format.? or_else DEFAULT_PREFERRED_SURFACE_FORMAT,
 			avbailable_surface_formats,
 		)
-		if !same && g_enable_logging {
+		if !same {
 			fmt.printfln(
 				"[Device] Preferred surface format was not available. %v has been chosen",
 				surface_format,
@@ -388,7 +420,7 @@ create_swapchain :: proc(
 			desc.preferred_present_mode.? or_else DEFAULT_PREFERRED_PRESENT_MODE,
 			available_present_modes,
 		)
-		if !same_ && g_enable_logging {
+		if !same_ {
 			fmt.printfln(
 				"[Device] Preferred presentation mode was not available. %v has been chosen",
 				present_mode,
@@ -627,21 +659,27 @@ create_and_upload_buffer :: proc(
 }
 
 Image :: struct {
-	image:  vk.Image,
-	view:   vk.ImageView,
-	memory: vk.DeviceMemory,
+	image:          vk.Image,
+	view:           vk.ImageView,
+	memory:         vk.DeviceMemory,
+	format:         vk.Format,
+	bindless_index: u32,
 }
 
 Image_Create_Desc :: struct {
-	width:  u32,
-	height: u32,
-	format: vk.Format,
-	usage:  vk.ImageUsageFlags,
-	memory: Memory_Preset,
+	width:             u32,
+	height:            u32,
+	format:            vk.Format,
+	usage:             vk.ImageUsageFlags,
+	memory:            Memory_Preset,
+	// if true (and usage includes .STORAGE), registers the image into the
+	// bindless set immediately and fills in Image.bindless_index
+	register_bindless: bool,
 }
 
 create_image :: proc(device: ^Device, desc: Image_Create_Desc) -> Image {
 	out: Image
+	out.format = desc.format
 
 	image_ci := vk.ImageCreateInfo {
 		sType       = .IMAGE_CREATE_INFO,
@@ -685,6 +723,12 @@ create_image :: proc(device: ^Device, desc: Image_Create_Desc) -> Image {
 	}
 	chk(vk.CreateImageView(device.device, &view_ci, nil, &out.view))
 
+	// register into the bindless set right away so callers can stash the
+	// index straight into a push constant, no separate call needed
+	if desc.register_bindless {
+		out.bindless_index = bindless_register_storage_image(device, out.view, out.format)
+	}
+
 	return out
 }
 
@@ -698,6 +742,72 @@ destroy_image :: proc(device: ^Device, image: Image) {
 	if image.memory != 0 {
 		vk.FreeMemory(device.device, image.memory, nil)
 	}
+}
+
+bindless_register_storage_image :: proc(d: ^Device, view: vk.ImageView, format: vk.Format) -> u32 {
+	binding, slot := storage_image_binding_and_slot(d, format)
+	info := vk.DescriptorImageInfo {
+		imageView   = view,
+		imageLayout = .GENERAL,
+	}
+	write := vk.WriteDescriptorSet {
+		sType           = .WRITE_DESCRIPTOR_SET,
+		dstSet          = d.descriptor_set,
+		dstBinding      = binding,
+		dstArrayElement = slot,
+		descriptorCount = 1,
+		descriptorType  = .STORAGE_IMAGE,
+		pImageInfo      = &info,
+	}
+	vk.UpdateDescriptorSets(d.device, 1, &write, 0, nil)
+	return slot
+}
+
+// Registers a sampler into the bindless set. Returns the index to use in
+// the GLSL `samplers[]` array.
+bindless_register_sampler :: proc(d: ^Device, sampler: vk.Sampler) -> u32 {
+	slot := d.bindless_next.sampler
+	d.bindless_next.sampler += 1
+	info := vk.DescriptorImageInfo {
+		sampler = sampler,
+	}
+	write := vk.WriteDescriptorSet {
+		sType           = .WRITE_DESCRIPTOR_SET,
+		dstSet          = d.descriptor_set,
+		dstBinding      = BINDLESS_SAMPLER_BINDING,
+		dstArrayElement = slot,
+		descriptorCount = 1,
+		descriptorType  = .SAMPLER,
+		pImageInfo      = &info,
+	}
+	vk.UpdateDescriptorSets(d.device, 1, &write, 0, nil)
+	return slot
+}
+
+@(private = "file")
+storage_image_binding_and_slot :: proc(
+	d: ^Device,
+	format: vk.Format,
+) -> (
+	binding: u32,
+	slot: u32,
+) {
+	#partial switch format {
+	case .R32_UINT:
+		binding = BINDLESS_STORAGE_U32_BINDING
+		slot = d.bindless_next.storage_u32
+		d.bindless_next.storage_u32 += 1
+	case .R8G8B8A8_UNORM:
+		binding = BINDLESS_STORAGE_RGBA8_BINDING
+		slot = d.bindless_next.storage_rgba8
+		d.bindless_next.storage_rgba8 += 1
+	case:
+		fmt.panicf(
+			"[Device] No bindless storage array for format %v - add one in luma.glsl and a case here",
+			format,
+		)
+	}
+	return
 }
 
 // ────────────────────────────────────────────────────────────────

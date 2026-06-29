@@ -1,8 +1,9 @@
-package noble
+package luma
 
 import "core:fmt"
 import "core:mem"
 import "core:os"
+import "core:path/filepath"
 import "core:slice"
 import "core:strings"
 import vk "vendor:vulkan"
@@ -407,6 +408,14 @@ compile_and_load_spirv :: proc(m: ^Pipeline_Manager, path: string) -> ([]u32, bo
 		{m.compile_shader_directory, path, ".spv"},
 		context.temp_allocator,
 	)
+
+	dst_dir := filepath.dir(dst_path, context.temp_allocator)
+	if !os.exists(dst_dir) {
+		if err := os.make_directory_all(dst_dir); err != nil {
+			fmt.eprintfln("failed to create shader output directory %q: %v", dst_dir, err)
+			return nil, false
+		}
+	}
 
 	state, stdout, stderr, proc_err := os.process_exec(
 		{command = {"glslc", src_path, "-o", dst_path}},
