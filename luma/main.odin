@@ -56,11 +56,7 @@ main :: proc() {
 	device: Device
 	device_init(
 		&device,
-		{
-			enable_validation = true,
-			shared_types_file_path = #directory + "shared_types.odin",
-			physical_device_selection_fn = device_selection_fn,
-		},
+		{enable_validation = true, physical_device_selection_fn = device_selection_fn},
 	)
 	defer device_cleanup(&device)
 
@@ -75,7 +71,6 @@ main :: proc() {
 		vertex_buffer:    vk.DeviceAddress,
 		draw_data_buffer: vk.DeviceAddress,
 	}
-
 	visbuffer_pipeline := pipeline_manager_add_raster(
 		&pipeline_manager,
 		{
@@ -112,7 +107,7 @@ main :: proc() {
 	camera_update_proj(&camera, f32(window.width) / f32(window.height))
 
 	scene: Scene
-	scene_init(&scene, &device, "assets/crytek_sponza.bin")
+	scene_init(&scene, &device, "assets/scene.bin")
 	defer scene_cleanup(&scene, &device)
 
 	visbuffer := create_image(
@@ -188,51 +183,25 @@ main :: proc() {
 		swapchain_image := swapchain_acquire_image(&swapchain)
 		handle, cb := command_handler_acquire(&device.command_handler)
 
-		rend_barriers := [?]vk.ImageMemoryBarrier2 {
+		image_barriers(
+			cb,
 			{
-				sType = .IMAGE_MEMORY_BARRIER_2,
-				srcStageMask = {},
-				srcAccessMask = {},
-				dstStageMask = {.COLOR_ATTACHMENT_OUTPUT},
-				dstAccessMask = {.COLOR_ATTACHMENT_WRITE},
-				oldLayout = .UNDEFINED,
-				newLayout = .COLOR_ATTACHMENT_OPTIMAL,
-				image = visbuffer.image,
-				subresourceRange = vk.ImageSubresourceRange {
-					aspectMask = {.COLOR},
-					levelCount = 1,
-					layerCount = 1,
-				},
+				image = &visbuffer,
+				dst_stage = {.COLOR_ATTACHMENT_OUTPUT},
+				dst_access = {.COLOR_ATTACHMENT_WRITE},
 			},
 			{
-				sType = .IMAGE_MEMORY_BARRIER_2,
-				srcStageMask = {},
-				srcAccessMask = {},
-				dstStageMask = {.LATE_FRAGMENT_TESTS},
-				dstAccessMask = {.DEPTH_STENCIL_ATTACHMENT_WRITE},
-				oldLayout = .UNDEFINED,
-				newLayout = .DEPTH_ATTACHMENT_OPTIMAL,
-				image = depth_image.image,
-				subresourceRange = vk.ImageSubresourceRange {
-					aspectMask = {.DEPTH},
-					levelCount = 1,
-					layerCount = 1,
-				},
+				image = &depth_image,
+				dst_stage = {.LATE_FRAGMENT_TESTS},
+				dst_access = {.DEPTH_STENCIL_ATTACHMENT_WRITE},
 			},
-		}
-
-		rend_dep := vk.DependencyInfo {
-			sType                   = .DEPENDENCY_INFO,
-			imageMemoryBarrierCount = len(rend_barriers),
-			pImageMemoryBarriers    = raw_data(&rend_barriers),
-		}
-		vk.CmdPipelineBarrier2(cb, &rend_dep)
+		)
 
 		t := f32(swapchain.frame_idx) * 0.0005
 		color_attachments := vk.RenderingAttachmentInfo {
 			sType = .RENDERING_ATTACHMENT_INFO,
 			imageView = visbuffer.view,
-			imageLayout = .COLOR_ATTACHMENT_OPTIMAL,
+			imageLayout = .GENERAL,
 			loadOp = .CLEAR,
 			storeOp = .STORE,
 			clearValue = {color = vk.ClearColorValue{uint32 = [4]u32{}}},
@@ -240,7 +209,7 @@ main :: proc() {
 		depth_attachment := vk.RenderingAttachmentInfo {
 			sType = .RENDERING_ATTACHMENT_INFO,
 			imageView = depth_image.view,
-			imageLayout = .DEPTH_ATTACHMENT_OPTIMAL,
+			imageLayout = .GENERAL,
 			loadOp = .CLEAR,
 			clearValue = {depthStencil = {depth = 1.0}},
 		}
@@ -281,7 +250,7 @@ main :: proc() {
 			size_of(Visbuffer_Push),
 			&push,
 		)
-		bind_pipeline(cb, visbuffer_pipeline)
+		bind_raster_pipeline(cb, visbuffer_pipeline)
 		vk.CmdBindIndexBuffer(cb, scene.index_buffer.buffer, 0, .UINT32)
 		vk.CmdDrawIndexedIndirect(
 			cb,
@@ -293,50 +262,22 @@ main :: proc() {
 
 		vk.CmdEndRendering(cb)
 
-		trans_barriers := [?]vk.ImageMemoryBarrier2 {
+		image_barriers(
+			cb,
 			{
-				sType = .IMAGE_MEMORY_BARRIER_2,
-				srcStageMask = {.COLOR_ATTACHMENT_OUTPUT},
-				srcAccessMask = {.COLOR_ATTACHMENT_WRITE},
-				dstStageMask = {.FRAGMENT_SHADER},
-				dstAccessMask = {.SHADER_STORAGE_READ},
-				oldLayout = .COLOR_ATTACHMENT_OPTIMAL,
-				newLayout = .GENERAL,
-				image = visbuffer.image,
-				subresourceRange = vk.ImageSubresourceRange {
-					aspectMask = {.COLOR},
-					levelCount = 1,
-					layerCount = 1,
-				},
+				image = &visbuffer,
+				src_stage = {.COLOR_ATTACHMENT_OUTPUT},
+				src_access = {.COLOR_ATTACHMENT_WRITE},
+				dst_stage = {.FRAGMENT_SHADER},
+				dst_access = {.SHADER_STORAGE_READ},
 			},
-			{
-				sType = .IMAGE_MEMORY_BARRIER_2,
-				srcStageMask = {},
-				srcAccessMask = {},
-				dstStageMask = {.COLOR_ATTACHMENT_OUTPUT},
-				dstAccessMask = {.COLOR_ATTACHMENT_WRITE},
-				oldLayout = .UNDEFINED,
-				newLayout = .COLOR_ATTACHMENT_OPTIMAL,
-				image = swapchain_image.image,
-				subresourceRange = vk.ImageSubresourceRange {
-					aspectMask = {.COLOR},
-					levelCount = 1,
-					layerCount = 1,
-				},
-			},
-		}
-		trans_dep := vk.DependencyInfo {
-			sType                   = .DEPENDENCY_INFO,
-			imageMemoryBarrierCount = len(trans_barriers),
-			pImageMemoryBarriers    = raw_data(&trans_barriers),
-		}
-		vk.CmdPipelineBarrier2(cb, &trans_dep)
+		)
 
 		// Render a fullscreen triangle that samples the visbuffer
 		swap_color_attachments := vk.RenderingAttachmentInfo {
 			sType = .RENDERING_ATTACHMENT_INFO,
 			imageView = swapchain_image.view,
-			imageLayout = .COLOR_ATTACHMENT_OPTIMAL,
+			imageLayout = .GENERAL,
 			loadOp = .CLEAR,
 			storeOp = .STORE,
 			clearValue = {color = vk.ClearColorValue{float32 = [4]f32{0.0, 0.0, 0.0, 0.0}}},
@@ -363,32 +304,11 @@ main :: proc() {
 			size_of(Present_Push),
 			&present_pc,
 		)
-		bind_pipeline(cb, present_pipeline)
+		bind_raster_pipeline(cb, present_pipeline)
 		vk.CmdDraw(cb, 3, 1, 0, 0)
 		vk.CmdEndRendering(cb)
 
-		// Transition to PRESENT
-		present_barrier := vk.ImageMemoryBarrier2 {
-			sType = .IMAGE_MEMORY_BARRIER_2,
-			srcStageMask = {.COLOR_ATTACHMENT_OUTPUT},
-			srcAccessMask = {.COLOR_ATTACHMENT_WRITE},
-			dstStageMask = {},
-			dstAccessMask = {},
-			oldLayout = .COLOR_ATTACHMENT_OPTIMAL,
-			newLayout = .PRESENT_SRC_KHR,
-			image = swapchain_image.image,
-			subresourceRange = vk.ImageSubresourceRange {
-				aspectMask = {.COLOR},
-				levelCount = 1,
-				layerCount = 1,
-			},
-		}
-		present_dep := vk.DependencyInfo {
-			sType                   = .DEPENDENCY_INFO,
-			imageMemoryBarrierCount = 1,
-			pImageMemoryBarriers    = &present_barrier,
-		}
-		vk.CmdPipelineBarrier2(cb, &present_dep)
+		swapchain_barrier_to_present(cb, swapchain_image)
 
 		command_handler_submit(&device.command_handler, handle, true)
 		swapchain_present(&swapchain)

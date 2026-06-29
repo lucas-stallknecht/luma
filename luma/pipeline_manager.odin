@@ -16,16 +16,101 @@ Pipeline_Manager :: struct {
 	shader_directory:         string,
 	compile_shader_directory: string,
 	raster_pipelines:         map[string]Raster_Pipeline,
+	compute_pipelines:        map[string]Compute_Pipeline,
 }
 
 MAX_COLOR_ATTACHMENTS :: 4
 
+create_pipeline_manager :: proc(
+	d: ^Device,
+	shader_directory: string,
+	compile_shader_directory: string,
+) -> Pipeline_Manager {
+	return {
+		device = d,
+		raster_pipelines = make(map[string]Raster_Pipeline),
+		compute_pipelines = make(map[string]Compute_Pipeline),
+		shader_directory = shader_directory,
+		compile_shader_directory = compile_shader_directory,
+	}
+}
+
 pipeline_manager_cleanup :: proc(m: ^Pipeline_Manager) {
 	for _, &pipeline in m.raster_pipelines {
 		destroy_raster_pipeline(m.device.device, &pipeline)
-		info_free(&pipeline.info)
+		raster_info_free(&pipeline.info)
 	}
 	delete(m.raster_pipelines)
+	for _, &pipeline in m.compute_pipelines {
+		destroy_compute_pipeline(m.device.device, &pipeline)
+		compute_info_free(&pipeline.info)
+	}
+	delete(m.compute_pipelines)
+}
+
+// compiles everything first, only swaps pipelines if it all succeeded -
+// one broken shader shouldn't kill the ones that still work
+pipeline_reload_all :: proc(m: ^Pipeline_Manager) -> bool {
+	raster_entries := make([dynamic]struct {
+			name:     string,
+			vertex:   []u32,
+			fragment: []u32,
+		}, context.temp_allocator)
+	compute_entries := make([dynamic]struct {
+			name: string,
+			code: []u32,
+		}, context.temp_allocator)
+
+	all_ok := true
+	for name, &pipeline in m.raster_pipelines {
+		v, v_ok := compile_and_load_spirv(m, pipeline.info.vertex_shader)
+		f, f_ok := compile_and_load_spirv(m, pipeline.info.fragment_shader)
+		if !(v_ok && f_ok) {
+			all_ok = false
+			// keep compiling the rest so the user gets full diagnostics
+			continue
+		}
+		append(&raster_entries, struct {
+			name:     string,
+			vertex:   []u32,
+			fragment: []u32,
+		}{name = name, vertex = v, fragment = f})
+	}
+	for name, &pipeline in m.compute_pipelines {
+		c, ok := compile_and_load_spirv(m, pipeline.info.shader)
+		if !ok {
+			all_ok = false
+			continue
+		}
+		append(&compute_entries, struct {
+			name: string,
+			code: []u32,
+		}{name = name, code = c})
+	}
+
+	if !all_ok do return false
+
+	vk.DeviceWaitIdle(m.device.device)
+	for entry in raster_entries {
+		p := &m.raster_pipelines[entry.name]
+		p.cached_spirv.vertex = entry.vertex
+		p.cached_spirv.fragment = entry.fragment
+	}
+	for entry in compute_entries {
+		p := &m.compute_pipelines[entry.name]
+		p.cached_spirv = entry.code
+	}
+
+	for _, &pipeline in m.raster_pipelines {
+		destroy_raster_pipeline(m.device.device, &pipeline)
+		create_raster_pipeline(m, &pipeline)
+	}
+	for _, &pipeline in m.compute_pipelines {
+		destroy_compute_pipeline(m.device.device, &pipeline)
+		create_compute_pipeline(m, &pipeline)
+	}
+
+	return true
 }
 
 // ────────────────────────────────────────────────────────────────
@@ -40,11 +125,6 @@ Raster_Pipeline :: struct {
 		fragment: []u32,
 	},
 	bindless_set: vk.DescriptorSet,
-}
-
-Shader_Info :: struct {
-	byte_code:   []u32,
-	entry_point: cstring,
 }
 
 Rasterizer_Info :: struct {
@@ -92,9 +172,9 @@ pipeline_manager_add_raster :: proc(
 	assert(info.name != "", "pipeline must have a non-empty name")
 	assert(
 		info.name not_in m.raster_pipelines,
-		"pipeline already registered. Use pipeline_manager_reload",
+		"pipeline already registered. Use pipeline_reload_all",
 	)
-	info2 := info_clone(info)
+	info2 := raster_info_clone(info)
 	pipeline := map_insert(
 		&m.raster_pipelines,
 		info2.name,
@@ -105,64 +185,22 @@ pipeline_manager_add_raster :: proc(
 	return pipeline
 }
 
-pipeline_manager_get :: proc(manager: ^Pipeline_Manager, name: string) -> ^Raster_Pipeline {
-	return &manager.raster_pipelines[name]
+pipeline_manager_get_raster :: proc(m: ^Pipeline_Manager, name: string) -> ^Raster_Pipeline {
+	return &m.raster_pipelines[name]
 }
 
-pipeline_manager_remove :: proc(m: ^Pipeline_Manager, name: string) {
+pipeline_manager_remove_raster :: proc(m: ^Pipeline_Manager, name: string) {
 	pipeline, found := &m.raster_pipelines[name]
 	if !found do return
 	destroy_raster_pipeline(m.device.device, pipeline)
-	info_free(&pipeline.info)
+	raster_info_free(&pipeline.info)
 	delete_key(&m.raster_pipelines, name)
 }
 
-pipeline_reload_all :: proc(m: ^Pipeline_Manager) -> bool {
-	// two-phase reload: compile all shaders first. If any compilation fails,
-	// do not destroy or recreate existing pipelines
-	entries := make([dynamic]struct {
-			name:     string,
-			vertex:   []u32,
-			fragment: []u32,
-		}, context.temp_allocator)
-
-	all_ok: bool = true
-	for name, &pipeline in m.raster_pipelines {
-		v, v_ok := compile_and_load_spirv(m, pipeline.info.vertex_shader)
-		f, f_ok := compile_and_load_spirv(m, pipeline.info.fragment_shader)
-		if !(v_ok && f_ok) {
-			all_ok = false
-			// continue compiling other shaders so user gets full diagnostics
-			continue
-		}
-		append(&entries, struct {
-			name:     string,
-			vertex:   []u32,
-			fragment: []u32,
-		}{name = name, vertex = v, fragment = f})
-	}
-
-	if !all_ok {
-		return false
-	}
-
-	// all shaders compiled successfully: update cached SPIR-V and recreate pipelines
-	vk.DeviceWaitIdle(m.device.device)
-	for entry in entries {
-		p := &m.raster_pipelines[entry.name]
-		p.cached_spirv.vertex = entry.vertex
-		p.cached_spirv.fragment = entry.fragment
-	}
-
-	for key, &pipeline in m.raster_pipelines {
-		destroy_raster_pipeline(m.device.device, &pipeline)
-		create_raster_pipeline(m, &pipeline)
-	}
-
-	return true
+bind_raster_pipeline :: proc(cb: vk.CommandBuffer, pipeline: ^Raster_Pipeline) {
+	vk.CmdBindPipeline(cb, .GRAPHICS, pipeline.pipeline)
+	vk.CmdBindDescriptorSets(cb, .GRAPHICS, pipeline.layout, 0, 1, &pipeline.bindless_set, 0, nil)
 }
-
-// ────────────────────────────────────────────────────────────────
 
 @(private = "file")
 create_raster_pipeline :: proc(m: ^Pipeline_Manager, pipeline: ^Raster_Pipeline) {
@@ -346,6 +384,165 @@ create_raster_pipeline :: proc(m: ^Pipeline_Manager, pipeline: ^Raster_Pipeline)
 }
 
 @(private = "file")
+destroy_raster_pipeline :: proc(device: vk.Device, pipeline: ^Raster_Pipeline) {
+	if pipeline.pipeline != 0 {
+		vk.DestroyPipeline(device, pipeline.pipeline, nil)
+	}
+	if pipeline.layout != 0 {
+		vk.DestroyPipelineLayout(device, pipeline.layout, nil)
+	}
+}
+
+@(private = "file")
+raster_info_clone :: proc(src: Raster_Pipeline_Info) -> (dst: Raster_Pipeline_Info) {
+	dst = src
+	dst.vertex_shader = strings.clone(src.vertex_shader)
+	dst.fragment_shader = strings.clone(src.fragment_shader)
+	dst.color_attachments = slice.clone(src.color_attachments)
+	dst.name = strings.clone(src.name)
+	return
+}
+
+@(private = "file")
+raster_info_free :: proc(info: ^Raster_Pipeline_Info) {
+	delete(info.vertex_shader)
+	delete(info.fragment_shader)
+	delete(info.color_attachments)
+	delete(info.name)
+}
+
+// ────────────────────────────────────────────────────────────────
+// Compute
+
+Compute_Pipeline :: struct {
+	pipeline:     vk.Pipeline,
+	layout:       vk.PipelineLayout,
+	info:         Compute_Pipeline_Info,
+	cached_spirv: []u32,
+	bindless_set: vk.DescriptorSet,
+}
+
+Compute_Pipeline_Info :: struct {
+	shader:             string,
+	push_constant_size: u32,
+	name:               string, // Debug label (used by the manager as the pipeline key)
+}
+
+pipeline_manager_add_compute :: proc(
+	m: ^Pipeline_Manager,
+	info: Compute_Pipeline_Info,
+) -> ^Compute_Pipeline {
+	assert(info.name != "", "pipeline must have a non-empty name")
+	assert(
+		info.name not_in m.compute_pipelines,
+		"pipeline already registered. Use pipeline_reload_all",
+	)
+	info2 := compute_info_clone(info)
+	pipeline := map_insert(
+		&m.compute_pipelines,
+		info2.name,
+		Compute_Pipeline{info = info2, bindless_set = m.device.descriptor_set},
+	)
+	create_compute_pipeline(m, pipeline)
+
+	return pipeline
+}
+
+pipeline_manager_get_compute :: proc(m: ^Pipeline_Manager, name: string) -> ^Compute_Pipeline {
+	return &m.compute_pipelines[name]
+}
+
+pipeline_manager_remove_compute :: proc(m: ^Pipeline_Manager, name: string) {
+	pipeline, found := &m.compute_pipelines[name]
+	if !found do return
+	destroy_compute_pipeline(m.device.device, pipeline)
+	compute_info_free(&pipeline.info)
+	delete_key(&m.compute_pipelines, name)
+}
+
+bind_compute_pipeline :: proc(cb: vk.CommandBuffer, pipeline: ^Compute_Pipeline) {
+	vk.CmdBindPipeline(cb, .COMPUTE, pipeline.pipeline)
+	vk.CmdBindDescriptorSets(cb, .COMPUTE, pipeline.layout, 0, 1, &pipeline.bindless_set, 0, nil)
+}
+
+@(private = "file")
+create_compute_pipeline :: proc(m: ^Pipeline_Manager, pipeline: ^Compute_Pipeline) {
+	info := &pipeline.info
+
+	if len(pipeline.cached_spirv) == 0 {
+		spv, ok := compile_and_load_spirv(m, info.shader)
+		if ok {
+			pipeline.cached_spirv = spv
+		}
+	}
+
+	module: vk.ShaderModule
+	defer if module != 0 {
+		vk.DestroyShaderModule(m.device.device, module, nil)
+	}
+	stage: vk.PipelineShaderStageCreateInfo
+	push_stage(
+		m.device.device,
+		Shader_Info{byte_code = pipeline.cached_spirv},
+		.COMPUTE,
+		&module,
+		&stage,
+	)
+
+	pc_range := vk.PushConstantRange {
+		stageFlags = {.COMPUTE},
+		size       = info.push_constant_size,
+	}
+	layout_ci := vk.PipelineLayoutCreateInfo {
+		sType                  = .PIPELINE_LAYOUT_CREATE_INFO,
+		setLayoutCount         = 1,
+		pSetLayouts            = &m.device.descriptor_layout,
+		pushConstantRangeCount = 1 if info.push_constant_size > 0 else 0,
+		pPushConstantRanges    = &pc_range if info.push_constant_size > 0 else nil,
+	}
+	chk(vk.CreatePipelineLayout(m.device.device, &layout_ci, nil, &pipeline.layout))
+
+	pipeline_ci := vk.ComputePipelineCreateInfo {
+		sType  = .COMPUTE_PIPELINE_CREATE_INFO,
+		stage  = stage,
+		layout = pipeline.layout,
+	}
+	chk(vk.CreateComputePipelines(m.device.device, 0, 1, &pipeline_ci, nil, &pipeline.pipeline))
+}
+
+@(private = "file")
+destroy_compute_pipeline :: proc(device: vk.Device, pipeline: ^Compute_Pipeline) {
+	if pipeline.pipeline != 0 {
+		vk.DestroyPipeline(device, pipeline.pipeline, nil)
+	}
+	if pipeline.layout != 0 {
+		vk.DestroyPipelineLayout(device, pipeline.layout, nil)
+	}
+}
+
+@(private = "file")
+compute_info_free :: proc(info: ^Compute_Pipeline_Info) {
+	delete(info.shader)
+	delete(info.name)
+}
+
+@(private = "file")
+compute_info_clone :: proc(src: Compute_Pipeline_Info) -> (dst: Compute_Pipeline_Info) {
+	dst = src
+	dst.shader = strings.clone(src.shader)
+	dst.name = strings.clone(src.name)
+	return
+}
+
+// ────────────────────────────────────────────────────────────────
+// Shader compiling
+
+Shader_Info :: struct {
+	byte_code:   []u32,
+	entry_point: cstring,
+}
+
+@(private = "file")
 push_stage :: proc(
 	device: vk.Device,
 	si: Shader_Info,
@@ -366,40 +563,6 @@ push_stage :: proc(
 		pName  = si.entry_point if si.entry_point != nil else "main",
 	}
 }
-
-@(private = "file")
-destroy_raster_pipeline :: proc(device: vk.Device, pipeline: ^Raster_Pipeline) {
-	if pipeline.pipeline != 0 {
-		vk.DestroyPipeline(device, pipeline.pipeline, nil)
-	}
-	if pipeline.layout != 0 {
-		vk.DestroyPipelineLayout(device, pipeline.layout, nil)
-	}
-}
-
-@(private = "file")
-shader_clone :: proc(s: Shader_Info) -> Shader_Info {
-	return {byte_code = slice.clone(s.byte_code), entry_point = s.entry_point}
-}
-
-@(private = "file")
-info_clone :: proc(src: Raster_Pipeline_Info) -> (dst: Raster_Pipeline_Info) {
-	dst = src
-	dst.vertex_shader = strings.clone(src.vertex_shader)
-	dst.fragment_shader = strings.clone(src.fragment_shader)
-	dst.color_attachments = slice.clone(src.color_attachments)
-	dst.name = strings.clone(src.name)
-	return
-}
-
-@(private = "file")
-info_free :: proc(info: ^Raster_Pipeline_Info) {
-	delete(info.vertex_shader)
-	delete(info.fragment_shader)
-	delete(info.color_attachments)
-	delete(info.name)
-}
-
 
 @(private = "file")
 compile_and_load_spirv :: proc(m: ^Pipeline_Manager, path: string) -> ([]u32, bool) #optional_ok {
