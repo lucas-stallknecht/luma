@@ -1,8 +1,12 @@
 import datetime
 import struct
+from dataclasses import dataclass
+from typing import cast
 
 import bpy
 import numpy as np
+from mathutils import Vector
+from numpy.typing import NDArray
 
 HEADER_STRUCT = struct.Struct("12I")
 MATERIAL_STRUCT = struct.Struct("4f")
@@ -17,23 +21,37 @@ axis_fix = np.array(
     dtype=np.float32,
 )
 
+
+@dataclass
+class MaterialData:
+    color: Vector
+
+
+@dataclass
+class Renderable:
+    transform: NDArray[np.float32]
+    material_idx: int
+    index_offset: int
+    index_count: int
+
+
 print("\n", str(datetime.datetime.now()))
 
-positions = []
-normals = []
-uvs = []
-indices = []
+positions: list[Vector] = []
+normals: list[Vector] = []
+uvs: list[Vector] = []
+indices: list[int] = []
 
-materials = []
-material_cache = {}  # material ptr -> material_idx
+materials: list[MaterialData] = []
+material_cache: dict[int, int] = {}  # material ptr -> material_idx
 
 vertex_cache = {}  # (obj_idx, v_idx, loop_idx) -> new vertex index
 next_vertex_index = 0
 
-renderables = []  # final draw calls
+renderables: list[Renderable] = []  # final draw calls
 
 
-def get_material_idx(mat):
+def get_material_idx(mat: bpy.types.Material | None) -> int:
     if mat is None:
         return -1
 
@@ -45,7 +63,7 @@ def get_material_idx(mat):
     material_cache[key] = idx
 
     color = mat.diffuse_color[:]
-    materials.append({"color": (color[0], color[1], color[2], color[3])})
+    materials.append(MaterialData(color=(color[0], color[1], color[2], color[3])))
 
     return idx
 
@@ -56,7 +74,9 @@ for obj_idx, obj in enumerate(bpy.context.selected_objects):
 
     print("Processing:", obj.name)
 
-    mesh = obj.data
+    mesh = cast(bpy.types.Mesh, obj.data)
+    if not mesh.uv_layers.active:
+        continue
     uv_layer = mesh.uv_layers.active.data if mesh.uv_layers else None
 
     # object transform
@@ -64,7 +84,7 @@ for obj_idx, obj in enumerate(bpy.context.selected_objects):
     transform = axis_fix @ np.array(obj.matrix_world, dtype=np.float32)
 
     # per-object grouping: (material_idx) -> indices
-    submesh_map = {}
+    submesh_map: dict[int, list[int]] = {}
 
     for tri in mesh.loop_triangles:
         mat = (
@@ -77,7 +97,7 @@ for obj_idx, obj in enumerate(bpy.context.selected_objects):
         if material_idx not in submesh_map:
             submesh_map[material_idx] = []
 
-        tri_indices = []
+        tri_indices: list[int] = []
 
         for loop_idx in tri.loops:
             loop = mesh.loops[loop_idx]
@@ -100,7 +120,7 @@ for obj_idx, obj in enumerate(bpy.context.selected_objects):
                 if uv_layer:
                     uvs.append(uv_layer[loop_idx].uv.copy())
                 else:
-                    uvs.append((0.0, 0.0))
+                    uvs.append(Vector((0.0, 0.0)))
 
             tri_indices.append(vertex_cache[key])
 
@@ -113,12 +133,12 @@ for obj_idx, obj in enumerate(bpy.context.selected_objects):
         index_count = len(tri_indices)
 
         renderables.append(
-            {
-                "transform": transform,
-                "material_idx": material_idx,
-                "index_offset": offset,
-                "index_count": index_count,
-            }
+            Renderable(
+                transform=transform,
+                material_idx=material_idx,
+                index_offset=offset,
+                index_count=index_count,
+            )
         )
 
         indices.extend(tri_indices)
@@ -157,7 +177,7 @@ print("Draw calls:", len(renderables))
 # materials (vec4)
 material_bytes = bytearray()
 for m in materials:
-    material_bytes.extend(MATERIAL_STRUCT.pack(*m["color"]))
+    material_bytes.extend(MATERIAL_STRUCT.pack(*m.color))
 
 # transform (mat4 = 16 * f32)
 # material_idx (u32)
@@ -167,10 +187,10 @@ renderable_bytes = bytearray()
 for r in renderables:
     renderable_bytes.extend(
         RENDERABLE_STRUCT.pack(
-            *r["transform"].flatten(),
-            r["material_idx"],
-            r["index_offset"],
-            r["index_count"],
+            *r.transform.flatten(),
+            r.material_idx,
+            r.index_offset,
+            r.index_count,
         )
     )
 
@@ -183,35 +203,34 @@ index_bytes = index_buffer.tobytes()
 filename = bpy.path.abspath("//scene.bin")
 
 with open(filename, "wb") as f:
-    f.write(b"\x00" * HEADER_STRUCT.size)
+    _ = f.write(b"\x00" * HEADER_STRUCT.size)
 
     positions_offset = f.tell()
-    f.write(pos_bytes)
+    _ = f.write(pos_bytes)
     positions_size = len(pos_bytes)
 
     normals_offset = f.tell()
-    f.write(normal_bytes)
+    _ = f.write(normal_bytes)
     normals_size = len(normal_bytes)
 
     uvs_offset = f.tell()
-    f.write(uv_bytes)
+    _ = f.write(uv_bytes)
     uvs_size = len(uv_bytes)
 
     indices_offset = f.tell()
-    f.write(index_bytes)
+    _ = f.write(index_bytes)
     indices_size = len(index_bytes)
 
     materials_offset = f.tell()
-    f.write(material_bytes)
+    _ = f.write(material_bytes)
     materials_size = len(material_bytes)
 
     renderables_offset = f.tell()
-    f.write(renderable_bytes)
+    _ = f.write(renderable_bytes)
     renderables_size = len(renderable_bytes)
 
-    f.seek(0)
-
-    f.write(
+    _ = f.seek(0)
+    _ = f.write(
         HEADER_STRUCT.pack(
             positions_offset,
             positions_size,
