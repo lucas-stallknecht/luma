@@ -4,14 +4,15 @@ import "core:fmt"
 import "core:math/linalg/glsl"
 import "core:os"
 import "core:slice"
+import "core:strings"
 import vk "vendor:vulkan"
-
 
 Scene :: struct {
 	triangle_count:      u32,
 	draw_count:          u32,
 	index_buffer:        Buffer,
 	position_buffer:     Buffer,
+	material_buffer:     Buffer,
 	draw_data_buffer:    Buffer,
 	draw_command_buffer: Buffer,
 }
@@ -25,6 +26,8 @@ Header :: struct {
 	uvs_size:           u32,
 	indices_offset:     u32,
 	indices_size:       u32,
+	textures_offset:    u32,
+	textures_size:      u32,
 	materials_offset:   u32,
 	materials_size:     u32,
 	renderables_offset: u32,
@@ -32,18 +35,21 @@ Header :: struct {
 }
 
 Material :: struct {
-	color: glsl.vec3,
+	base_color:                 glsl.vec3,
+	base_color_tex_idx:         i32,
+	metallic_roughness_tex_idx: i32,
+	normal_tex_idx:             i32,
 }
 
 Draw_Data :: struct #align (16) {
 	transform:     glsl.mat4,
-	material_idx:  u32,
+	material_idx:  i32,
 	triangle_base: u32,
 }
 
 Renderable :: struct {
 	transform:    [16]f32,
-	material_idx: u32,
+	material_idx: i32,
 	index_offset: u32,
 	index_count:  u32,
 }
@@ -58,6 +64,7 @@ scene_init :: proc(scene: ^Scene, device: ^Device, path: string) {
 	}
 
 	header := (^Header)(raw_data(data))^
+	fmt.println(header)
 	scene.triangle_count = (header.indices_size / size_of(u32)) / 3
 	fmt.println("- triangle count :", scene.triangle_count)
 
@@ -96,6 +103,27 @@ scene_init :: proc(scene: ^Scene, device: ^Device, path: string) {
 		},
 	)
 
+	// textures
+	textures_bytes := data[header.textures_offset:header.textures_offset + header.textures_size]
+	textures := parse_textures(string(textures_bytes))
+	defer delete(textures)
+
+	// materials
+	materials_bytes := data[header.materials_offset:header.materials_offset +
+	header.materials_size]
+	materials := slice.reinterpret([]Material, materials_bytes)
+	scene.material_buffer = create_and_upload_buffer(
+		device,
+		&temp_pool,
+		cb,
+		raw_data(materials),
+		{
+			size = vk.DeviceSize(header.materials_size),
+			usage = {.STORAGE_BUFFER, .SHADER_DEVICE_ADDRESS},
+			memory = .GPU_ONLY,
+		},
+	)
+
 	// renderables
 	renderables_bytes := data[header.renderables_offset:header.renderables_offset +
 	header.renderables_size]
@@ -110,7 +138,7 @@ scene_init :: proc(scene: ^Scene, device: ^Device, path: string) {
 		rend := renderables[i]
 		draw_data[i] = {
 			transform     = make_transform(rend.transform),
-			material_idx  = i,
+			material_idx  = rend.material_idx,
 			triangle_base = triangle_base,
 		}
 		draw_commands[i] = vk.DrawIndexedIndirectCommand {
@@ -165,8 +193,24 @@ scene_init :: proc(scene: ^Scene, device: ^Device, path: string) {
 scene_cleanup :: proc(scene: ^Scene, device: ^Device) {
 	destroy_buffer(device, &scene.position_buffer)
 	destroy_buffer(device, &scene.index_buffer)
+	destroy_buffer(device, &scene.material_buffer)
 	destroy_buffer(device, &scene.draw_data_buffer)
 	destroy_buffer(device, &scene.draw_command_buffer)
+}
+
+// textures are stored as a comma-separated list of quoted names, e.g. `"a","b"`
+@(private = "file")
+parse_textures :: proc(s: string) -> []string {
+	if len(s) == 0 {
+		return {}
+	}
+
+	parts := strings.split(s, ",", context.temp_allocator)
+	names := make([]string, len(parts))
+	for part, i in parts {
+		names[i] = strings.trim(part, `"`)
+	}
+	return names
 }
 
 @(private = "file")

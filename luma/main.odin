@@ -107,7 +107,7 @@ main :: proc() {
 	camera_update_proj(&camera, f32(window.width) / f32(window.height))
 
 	scene: Scene
-	scene_init(&scene, &device, "assets/scene.bin")
+	scene_init(&scene, &device, "assets/crytek_sponza/scene.bin")
 	defer scene_cleanup(&scene, &device)
 
 	visbuffer := create_image(

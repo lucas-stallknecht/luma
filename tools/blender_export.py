@@ -8,9 +8,9 @@ import numpy as np
 from mathutils import Vector
 from numpy.typing import NDArray
 
-HEADER_STRUCT = struct.Struct("12I")
-MATERIAL_STRUCT = struct.Struct("4f")
-RENDERABLE_STRUCT = struct.Struct("16f3I")
+HEADER_STRUCT = struct.Struct("14i")
+MATERIAL_STRUCT = struct.Struct("3f 3i")
+RENDERABLE_STRUCT = struct.Struct("16f 3i")
 axis_fix = np.array(
     [
         [1, 0, 0, 0],
@@ -24,7 +24,10 @@ axis_fix = np.array(
 
 @dataclass
 class MaterialData:
-    color: Vector
+    base_color: Vector = Vector()
+    base_color_tex_idx: int = -1
+    metallic_roughness_tex_idx: int = -1
+    normal_tex_idx: int = -1
 
 
 @dataclass
@@ -42,6 +45,9 @@ normals: list[Vector] = []
 uvs: list[Vector] = []
 indices: list[int] = []
 
+textures: list[str] = []
+texture_cache: dict[str, int] = {}  # texture name -> texture_idx
+
 materials: list[MaterialData] = []
 material_cache: dict[int, int] = {}  # material ptr -> material_idx
 
@@ -51,19 +57,103 @@ next_vertex_index = 0
 renderables: list[Renderable] = []  # final draw calls
 
 
+def get_texture_idx(name: str | None) -> int:
+    if not name:
+        return -1
+
+    if name in texture_cache:
+        return texture_cache[name]
+
+    idx = len(textures)
+    textures.append(name)
+    texture_cache[name] = idx
+    return idx
+
+
+def find_image_sources(
+    socket: bpy.types.NodeSocket | None,
+    visited: set[bpy.types.Node] | None = None,
+) -> list[str]:
+    if visited is None:
+        visited = set()
+
+    images: list[str] = []
+
+    if not socket or not socket.is_linked:
+        return images
+
+    for link in socket.links:
+        node: bpy.types.Node = link.from_node
+
+        if node in visited:
+            continue
+        visited.add(node)
+
+        if isinstance(node, bpy.types.ShaderNodeTexImage) and node.image:
+            images.append(node.image.name)
+            continue
+
+        for inp in node.inputs:
+            images.extend(find_image_sources(inp, visited))
+
+    return images
+
+
+def extract_pbr_material(
+    mat: bpy.types.Material,
+) -> MaterialData | None:
+    if not mat or not mat.node_tree:
+        return None
+
+    nodes = mat.node_tree.nodes
+    result = MaterialData()
+
+    for node in nodes:
+        if node.type != "BSDF_PRINCIPLED":
+            continue
+
+        bsdf: bpy.types.ShaderNodeBsdfPrincipled = node
+
+        base_tex = find_image_sources(bsdf.inputs["Base Color"])
+        result.base_color_tex_idx = get_texture_idx(base_tex[0]) if base_tex else -1
+        result.base_color = Vector(bsdf.inputs["Base Color"].default_value[:3])
+
+        # metallic and roughness may be shared
+        mr_textures: set[str] = set()
+        mr_textures.update(find_image_sources(bsdf.inputs["Metallic"]))
+        mr_textures.update(find_image_sources(bsdf.inputs["Roughness"]))
+
+        if mr_textures:
+            # if multiple, just pick first (or later: ORM packing logic)
+            result.metallic_roughness_tex_idx = get_texture_idx(next(iter(mr_textures)))
+
+        normal_textures: list[str] = []
+        for n in nodes:
+            if isinstance(n, bpy.types.ShaderNodeNormalMap):
+                normal_textures.extend(find_image_sources(n.inputs["Color"]))
+        if normal_textures:
+            result.normal_tex_idx = get_texture_idx(normal_textures[0])
+
+        break
+
+    return result
+
+
 def get_material_idx(mat: bpy.types.Material | None) -> int:
-    if mat is None:
+    if mat is None or not mat.use_nodes or not mat.node_tree:
         return -1
 
     key = mat.as_pointer()
     if key in material_cache:
         return material_cache[key]
 
+    new_material = extract_pbr_material(mat)
+    if not new_material:
+        return -1
+
     idx = len(materials)
     material_cache[key] = idx
-
-    color = mat.diffuse_color[:]
-    materials.append(MaterialData(color=(color[0], color[1], color[2], color[3])))
+    materials.append(new_material)
 
     return idx
 
@@ -144,6 +234,9 @@ for obj_idx, obj in enumerate(bpy.context.selected_objects):
         indices.extend(tri_indices)
         offset += index_count
 
+print(materials)
+print(textures)
+
 # final packed buffers
 position_buffer = np.array(positions, dtype=np.float32)
 normal_buffer = np.array(normals, dtype=np.float32)
@@ -163,6 +256,7 @@ print("Draw calls:", len(renderables))
 # normals_offset, normals_size
 # uvs_offset, uvs_size
 # indices_offset, indices_size
+# textures_offset, texture_size
 # materials_offset, materials_size
 # renderables_offset, renderables_size
 #
@@ -171,18 +265,29 @@ print("Draw calls:", len(renderables))
 # normals     (vec3)
 # uvs         (vec2)
 # indices     (u32)
-# materials   (vec4)
+# textures    (strings split by ,)
+# materials   (vec3 + 3 * i32)
 # renderables (mat4 + draw info)
 
-# materials (vec4)
+texture_string = ",".join(f'"{name}"' for name in textures)
+texture_bytes = texture_string.encode("utf-8")
+
+# materials
 material_bytes = bytearray()
 for m in materials:
-    material_bytes.extend(MATERIAL_STRUCT.pack(*m.color))
+    material_bytes.extend(
+        MATERIAL_STRUCT.pack(
+            *m.base_color,
+            m.base_color_tex_idx,
+            m.metallic_roughness_tex_idx,
+            m.normal_tex_idx,
+        )
+    )
 
 # transform (mat4 = 16 * f32)
-# material_idx (u32)
-# index_offset (u32)
-# index_count (u32)
+# material_idx (i32)
+# index_offset (i32)
+# index_count (i32)
 renderable_bytes = bytearray()
 for r in renderables:
     renderable_bytes.extend(
@@ -221,6 +326,10 @@ with open(filename, "wb") as f:
     _ = f.write(index_bytes)
     indices_size = len(index_bytes)
 
+    textures_offset = f.tell()
+    _ = f.write(texture_bytes)
+    textures_size = len(texture_bytes)
+
     materials_offset = f.tell()
     _ = f.write(material_bytes)
     materials_size = len(material_bytes)
@@ -240,6 +349,8 @@ with open(filename, "wb") as f:
             uvs_size,
             indices_offset,
             indices_size,
+            textures_offset,
+            textures_size,
             materials_offset,
             materials_size,
             renderables_offset,
