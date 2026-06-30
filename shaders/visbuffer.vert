@@ -1,6 +1,4 @@
 #version 460 core
-#extension GL_EXT_scalar_block_layout : require
-#extension GL_EXT_buffer_reference : require
 #include "types.glsl"
 
 layout(push_constant) uniform PushConstants
@@ -8,10 +6,15 @@ layout(push_constant) uniform PushConstants
     mat4 proj_view_matrix;
     VertexBuffer vertex_buffer;
     DrawDataBuffer draw_data_buffer;
+    UvBuffer uv_buffer;
+    MaterialBuffer material_buffer;
+    uint texture_sampler;
 } push;
 
 layout(location = 0) out flat uint triangle_base;
 layout(location = 1) out flat uint draw_id;
+layout(location = 2) out vec2 uv;
+layout(location = 3) out flat uint material_idx;
 
 void main() {
     vec3 pos = push.vertex_buffer.positions[gl_VertexIndex];
@@ -20,4 +23,6 @@ void main() {
     gl_Position = push.proj_view_matrix * draw.transform * vec4(pos, 1.0);
     triangle_base = draw.triangle_base;
     draw_id = uint(gl_DrawID);
+    uv = push.uv_buffer.uvs[gl_VertexIndex];
+    material_idx = draw.material_idx;
 }

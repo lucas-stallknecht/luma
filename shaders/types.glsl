@@ -1,6 +1,9 @@
 #ifndef TYPES_GLSL_INCLUDED
 #define TYPES_GLSL_INCLUDED
 
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_scalar_block_layout : require
+
 struct DrawData {
     mat4 transform;
     int material_idx;

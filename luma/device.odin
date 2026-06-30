@@ -187,10 +187,10 @@ device_init :: proc(d: ^Device, desc: Device_Desc) {
 			dynamicRendering = true,
 		}
 		vk10_features := vk.PhysicalDeviceFeatures {
-			samplerAnisotropy                    = true,
-			geometryShader                       = true,
-			multiDrawIndirect                    = true,
-			fragmentStoresAndAtomics             = true,
+			samplerAnisotropy        = true,
+			geometryShader           = true,
+			multiDrawIndirect        = true,
+			fragmentStoresAndAtomics = true,
 		}
 
 		device_ci := vk.DeviceCreateInfo {

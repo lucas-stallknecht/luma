@@ -70,6 +70,9 @@ main :: proc() {
 		proj_view_matrix: glsl.mat4,
 		vertex_buffer:    vk.DeviceAddress,
 		draw_data_buffer: vk.DeviceAddress,
+		uv_buffer:        vk.DeviceAddress,
+		material_buffer:  vk.DeviceAddress,
+		texture_sampler:  u32,
 	}
 	visbuffer_pipeline := pipeline_manager_add_raster(
 		&pipeline_manager,
@@ -174,7 +177,7 @@ main :: proc() {
 		borderColor  = .INT_OPAQUE_BLACK,
 	}
 	chk(vk.CreateSampler(device.device, &texture_sampler_ci, nil, &texture_sampler))
-	texutre_sampler_idx := bindless_register_sampler(&device, texture_sampler)
+	texture_sampler_idx := bindless_register_sampler(&device, texture_sampler)
 
 	defer {
 		if texture_sampler != 0 {
@@ -280,6 +283,9 @@ main :: proc() {
 			proj_view_matrix = camera.proj * camera_get_view(&camera),
 			vertex_buffer    = scene.position_buffer.device_address,
 			draw_data_buffer = scene.draw_data_buffer.device_address,
+			uv_buffer        = scene.uv_buffer.device_address,
+			material_buffer  = scene.material_buffer.device_address,
+			texture_sampler = texture_sampler_idx,
 		}
 		vk.CmdPushConstants(
 			cb,
@@ -323,7 +329,7 @@ main :: proc() {
 			normal_buffer    = scene.normal_buffer.device_address,
 			uv_buffer        = scene.uv_buffer.device_address,
 			material_buffer  = scene.material_buffer.device_address,
-			texture_sampler  = texutre_sampler_idx,
+			texture_sampler  = texture_sampler_idx,
 		}
 		vk.CmdPushConstants(cb, shading_pipeline.layout, {.COMPUTE}, 0, size_of(ShadingPush), &shading_pc)
 		bind_compute_pipeline(cb, shading_pipeline)

@@ -87,14 +87,15 @@ def find_image_sources(
 
         if node in visited:
             continue
-        visited.add(node)
 
         if isinstance(node, bpy.types.ShaderNodeTexImage) and node.image:
             images.append(node.image.name)
             continue
 
+        # copy visited per-branch so sibling inputs don't block each other
+        branch_visited = visited | {node}
         for inp in node.inputs:
-            images.extend(find_image_sources(inp, visited))
+            images.extend(find_image_sources(inp, branch_visited))
 
     return images
 
@@ -115,6 +116,8 @@ def extract_pbr_material(
         bsdf: bpy.types.ShaderNodeBsdfPrincipled = node
 
         base_tex = find_image_sources(bsdf.inputs["Base Color"])
+        if not base_tex:
+            base_tex = find_image_sources(bsdf.inputs["Alpha"])
         result.base_color_tex_idx = get_texture_idx(base_tex[0]) if base_tex else -1
         result.base_color = Vector(bsdf.inputs["Base Color"].default_value[:3])
 

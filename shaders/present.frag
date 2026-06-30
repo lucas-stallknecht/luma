@@ -1,5 +1,4 @@
 #version 460 core
-#extension GL_EXT_buffer_reference : require
 #include "luma.glsl"
 
 layout(push_constant) uniform PushConstants {

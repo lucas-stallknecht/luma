@@ -106,14 +106,11 @@ create_and_upload_image :: proc(
 	intrinsics.mem_copy(mapped, data, int(data_size))
 	vk.UnmapMemory(device.device, staging.memory)
 
-	image_barriers(
-		cb,
-		{image = &out, dst_stage = {.TRANSFER}, dst_access = {.TRANSFER_WRITE}},
-	)
+	image_barriers(cb, {image = &out, dst_stage = {.TRANSFER}, dst_access = {.TRANSFER_WRITE}})
 
 	copy_region := vk.BufferImageCopy {
 		imageSubresource = {aspectMask = {.COLOR}, layerCount = 1},
-		imageExtent      = {desc.width, desc.height, 1},
+		imageExtent = {desc.width, desc.height, 1},
 	}
 	vk.CmdCopyBufferToImage(cb, staging.buffer, out.image, .GENERAL, 1, &copy_region)
 
