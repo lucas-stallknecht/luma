@@ -6,8 +6,8 @@ import vk "vendor:vulkan"
 // one descriptor set for the whole renderer
 //
 // register a resource once, get back an index, and just pass that index around in push constants
-MAX_BINDLESS_IMAGES :: 1000
-MAX_SAMPLERS :: 20
+MAX_BINDLESS_IMAGES :: 100
+MAX_SAMPLERS :: 5
 
 BINDLESS_SAMPLER_BINDING :: 0
 BINDLESS_TEXTURE_BINDING :: 1
@@ -36,7 +36,7 @@ bindless_init :: proc(d: ^Device) {
 		common_binding_flags,
 		common_binding_flags,
 		common_binding_flags,
-		common_binding_flags | {.VARIABLE_DESCRIPTOR_COUNT},
+		common_binding_flags,
 	}
 	desc_binding_flags := vk.DescriptorSetLayoutBindingFlagsCreateInfo {
 		sType         = .DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO,
@@ -84,15 +84,8 @@ bindless_init :: proc(d: ^Device) {
 	}
 	chk(vk.CreateDescriptorSetLayout(d.device, &desc_layout_ci, nil, &d.descriptor_layout))
 
-	variable_desc_count: u32 = MAX_BINDLESS_IMAGES
-	variable_desc_ai := vk.DescriptorSetVariableDescriptorCountAllocateInfo {
-		sType              = .DESCRIPTOR_SET_VARIABLE_DESCRIPTOR_COUNT_ALLOCATE_INFO_EXT,
-		descriptorSetCount = 1,
-		pDescriptorCounts  = &variable_desc_count,
-	}
 	descriptor_set_ai := vk.DescriptorSetAllocateInfo {
 		sType              = .DESCRIPTOR_SET_ALLOCATE_INFO,
-		pNext              = &variable_desc_ai,
 		descriptorPool     = d.descriptor_pool,
 		descriptorSetCount = 1,
 		pSetLayouts        = &d.descriptor_layout,

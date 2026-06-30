@@ -172,15 +172,13 @@ device_init :: proc(d: ^Device, desc: Device_Desc) {
 			bufferDeviceAddress                          = true,
 			timelineSemaphore                            = true,
 			descriptorIndexing                           = true,
-			descriptorBindingVariableDescriptorCount     = true,
 			runtimeDescriptorArray                       = true,
 			shaderSampledImageArrayNonUniformIndexing    = true,
 			shaderStorageImageArrayNonUniformIndexing    = true,
-			shaderUniformBufferArrayNonUniformIndexing   = true,
 			descriptorBindingPartiallyBound              = true,
-			descriptorBindingUpdateUnusedWhilePending    = true,
 			descriptorBindingSampledImageUpdateAfterBind = true,
 			descriptorBindingStorageImageUpdateAfterBind = true,
+			scalarBlockLayout                            = true,
 		}
 		vk13_features := vk.PhysicalDeviceVulkan13Features {
 			sType            = .PHYSICAL_DEVICE_VULKAN_1_3_FEATURES,
@@ -192,8 +190,6 @@ device_init :: proc(d: ^Device, desc: Device_Desc) {
 			samplerAnisotropy                    = true,
 			geometryShader                       = true,
 			multiDrawIndirect                    = true,
-			shaderStorageImageReadWithoutFormat  = true,
-			shaderStorageImageWriteWithoutFormat = true,
 			fragmentStoresAndAtomics             = true,
 		}
 
