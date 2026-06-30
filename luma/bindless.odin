@@ -12,13 +12,14 @@ MAX_SAMPLERS :: 20
 BINDLESS_SAMPLER_BINDING :: 0
 BINDLESS_TEXTURE_BINDING :: 1
 BINDLESS_STORAGE_U32_BINDING :: 2
-BINDLESS_STORAGE_RGBA8_BINDING :: 3
+BINDLESS_STORAGE_HDR_BINDING :: 3
+BINDLESS_STORAGE_RGBA8_BINDING :: 4
 
 bindless_init :: proc(d: ^Device) {
 	desc_pool_sizes := [?]vk.DescriptorPoolSize {
 		{type = .SAMPLER, descriptorCount = MAX_SAMPLERS},
 		{type = .SAMPLED_IMAGE, descriptorCount = MAX_BINDLESS_IMAGES},
-		{type = .STORAGE_IMAGE, descriptorCount = MAX_BINDLESS_IMAGES * 2},
+		{type = .STORAGE_IMAGE, descriptorCount = MAX_BINDLESS_IMAGES * 3},
 	}
 	desc_pool_ci := vk.DescriptorPoolCreateInfo {
 		sType         = .DESCRIPTOR_POOL_CREATE_INFO,
@@ -31,6 +32,7 @@ bindless_init :: proc(d: ^Device) {
 
 	common_binding_flags := vk.DescriptorBindingFlags{.UPDATE_AFTER_BIND, .PARTIALLY_BOUND}
 	desc_binding_flags_arr := [?]vk.DescriptorBindingFlags {
+		common_binding_flags,
 		common_binding_flags,
 		common_binding_flags,
 		common_binding_flags,
@@ -56,6 +58,12 @@ bindless_init :: proc(d: ^Device) {
 		},
 		{
 			binding = BINDLESS_STORAGE_U32_BINDING,
+			descriptorType = .STORAGE_IMAGE,
+			descriptorCount = MAX_BINDLESS_IMAGES,
+			stageFlags = {.VERTEX, .FRAGMENT, .COMPUTE},
+		},
+		{
+			binding = BINDLESS_STORAGE_HDR_BINDING,
 			descriptorType = .STORAGE_IMAGE,
 			descriptorCount = MAX_BINDLESS_IMAGES,
 			stageFlags = {.VERTEX, .FRAGMENT, .COMPUTE},
@@ -166,10 +174,14 @@ storage_image_binding_and_slot :: proc(
 	slot: u32,
 ) {
 	#partial switch format {
-	case .R32_UINT:
+	case .R32G32_UINT:
 		binding = BINDLESS_STORAGE_U32_BINDING
 		slot = d.bindless_next.storage_u32
 		d.bindless_next.storage_u32 += 1
+	case .R32G32B32A32_SFLOAT:
+		binding = BINDLESS_STORAGE_HDR_BINDING
+		slot = d.bindless_next.storage_hdr
+		d.bindless_next.storage_hdr += 1
 	case .R8G8B8A8_UNORM:
 		binding = BINDLESS_STORAGE_RGBA8_BINDING
 		slot = d.bindless_next.storage_rgba8

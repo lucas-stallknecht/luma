@@ -3,12 +3,12 @@ package luma
 import vk "vendor:vulkan"
 
 Image :: struct {
-	image:          vk.Image,
-	view:           vk.ImageView,
-	memory:         vk.DeviceMemory,
-	format:         vk.Format,
-	layout:         vk.ImageLayout, // for image_barriers()
-	bindless_index: u32,
+	image:        vk.Image,
+	view:         vk.ImageView,
+	memory:       vk.DeviceMemory,
+	format:       vk.Format,
+	layout:       vk.ImageLayout, // for image_barriers()
+	bindless_idx: u32,
 }
 
 Image_Create_Desc :: struct {
@@ -69,7 +69,7 @@ create_image :: proc(device: ^Device, desc: Image_Create_Desc) -> Image {
 	chk(vk.CreateImageView(device.device, &view_ci, nil, &out.view))
 
 	if desc.register_bindless {
-		out.bindless_index = bindless_register_storage_image(device, out.view, out.format)
+		out.bindless_idx = bindless_register_storage_image(device, out.view, out.format)
 	}
 
 	return out

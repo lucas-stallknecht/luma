@@ -32,6 +32,7 @@ Device :: struct {
 		sampler:       u32,
 		texture:       u32,
 		storage_u32:   u32,
+		storage_hdr:   u32,
 		storage_rgba8: u32,
 	},
 }

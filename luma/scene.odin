@@ -12,6 +12,8 @@ Scene :: struct {
 	draw_count:          u32,
 	index_buffer:        Buffer,
 	position_buffer:     Buffer,
+	normal_buffer:       Buffer,
+	uv_buffer:           Buffer,
 	material_buffer:     Buffer,
 	draw_data_buffer:    Buffer,
 	draw_command_buffer: Buffer,
@@ -41,6 +43,13 @@ Material :: struct {
 	normal_tex_idx:             i32,
 }
 
+Material_GPU :: struct #align (16) {
+	base_color:                 glsl.vec3,
+	base_color_tex_idx:         i32,
+	metallic_roughness_tex_idx: i32,
+	normal_tex_idx:             i32,
+}
+
 Draw_Data :: struct #align (16) {
 	transform:     glsl.mat4,
 	material_idx:  i32,
@@ -64,7 +73,6 @@ scene_init :: proc(scene: ^Scene, device: ^Device, path: string) {
 	}
 
 	header := (^Header)(raw_data(data))^
-	fmt.println(header)
 	scene.triangle_count = (header.indices_size / size_of(u32)) / 3
 	fmt.println("- triangle count :", scene.triangle_count)
 
@@ -72,7 +80,7 @@ scene_init :: proc(scene: ^Scene, device: ^Device, path: string) {
 
 	temp_pool := make([dynamic]Buffer, context.temp_allocator)
 
-	// positions
+	// positions + normals + uvs
 	positions_bytes := data[header.positions_offset:header.positions_offset +
 	header.positions_size]
 	positions := slice.reinterpret([]f32, positions_bytes)
@@ -83,6 +91,34 @@ scene_init :: proc(scene: ^Scene, device: ^Device, path: string) {
 		raw_data(positions),
 		{
 			size = vk.DeviceSize(header.positions_size),
+			usage = {.STORAGE_BUFFER, .SHADER_DEVICE_ADDRESS},
+			memory = .GPU_ONLY,
+		},
+	)
+
+	normals_bytes := data[header.normals_offset:header.normals_offset + header.normals_size]
+	normals := slice.reinterpret([]f32, normals_bytes)
+	scene.normal_buffer = create_and_upload_buffer(
+		device,
+		&temp_pool,
+		cb,
+		raw_data(normals),
+		{
+			size = vk.DeviceSize(header.normals_size),
+			usage = {.STORAGE_BUFFER, .SHADER_DEVICE_ADDRESS},
+			memory = .GPU_ONLY,
+		},
+	)
+
+	uvs_bytes := data[header.uvs_offset:header.uvs_offset + header.uvs_size]
+	uvs := slice.reinterpret([]f32, uvs_bytes)
+	scene.uv_buffer = create_and_upload_buffer(
+		device,
+		&temp_pool,
+		cb,
+		raw_data(uvs),
+		{
+			size = vk.DeviceSize(header.uvs_size),
 			usage = {.STORAGE_BUFFER, .SHADER_DEVICE_ADDRESS},
 			memory = .GPU_ONLY,
 		},
@@ -112,13 +148,25 @@ scene_init :: proc(scene: ^Scene, device: ^Device, path: string) {
 	materials_bytes := data[header.materials_offset:header.materials_offset +
 	header.materials_size]
 	materials := slice.reinterpret([]Material, materials_bytes)
+
+	materials_gpu := make([]Material_GPU, len(materials))
+	for mat, i in materials {
+		materials_gpu[i] = {
+			base_color                 = mat.base_color,
+			base_color_tex_idx         = mat.base_color_tex_idx,
+			metallic_roughness_tex_idx = mat.metallic_roughness_tex_idx,
+			normal_tex_idx             = mat.normal_tex_idx,
+		}
+	}
+	defer delete(materials_gpu)
+
 	scene.material_buffer = create_and_upload_buffer(
 		device,
 		&temp_pool,
 		cb,
-		raw_data(materials),
+		raw_data(materials_gpu),
 		{
-			size = vk.DeviceSize(header.materials_size),
+			size = vk.DeviceSize(len(materials_gpu) * size_of(Material_GPU)),
 			usage = {.STORAGE_BUFFER, .SHADER_DEVICE_ADDRESS},
 			memory = .GPU_ONLY,
 		},
@@ -192,6 +240,8 @@ scene_init :: proc(scene: ^Scene, device: ^Device, path: string) {
 
 scene_cleanup :: proc(scene: ^Scene, device: ^Device) {
 	destroy_buffer(device, &scene.position_buffer)
+	destroy_buffer(device, &scene.normal_buffer)
+	destroy_buffer(device, &scene.uv_buffer)
 	destroy_buffer(device, &scene.index_buffer)
 	destroy_buffer(device, &scene.material_buffer)
 	destroy_buffer(device, &scene.draw_data_buffer)

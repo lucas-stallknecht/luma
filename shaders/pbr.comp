@@ -1,0 +1,109 @@
+#version 460 core
+#extension GL_EXT_buffer_reference : require
+#include "luma.glsl"
+#include "types.glsl"
+
+layout(buffer_reference, std430) readonly buffer IndexBuffer {
+    uint indices[];
+};
+layout(buffer_reference, std430) readonly buffer VertexBuffer {
+    float positions[];
+};
+layout(buffer_reference, std430) readonly buffer DrawDataBuffer {
+    DrawData draw_data[];
+};
+layout(buffer_reference, std430) readonly buffer NormalBuffer {
+    float normals[];
+};
+layout(buffer_reference, std430) readonly buffer UvBuffer {
+    float uvs[];
+};
+layout(buffer_reference, std430) readonly buffer MaterialBuffer {
+    Material materials[];
+};
+
+layout(push_constant) uniform PushConstants {
+    mat4 proj_view_matrix;
+    uint visbuffer;
+    uint out_image;
+    IndexBuffer index_buffer;
+    VertexBuffer vertex_buffer;
+    DrawDataBuffer draw_data_buffer;
+    NormalBuffer normal_buffer;
+    UvBuffer uv_buffer;
+    MaterialBuffer material_buffer;
+} push;
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+void main() {
+    ivec2 coord = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 size = imageSize(U32(push.visbuffer));
+    if (any(greaterThanEqual(coord, size))) return;
+
+    uvec4 pix = imageLoad(U32(push.visbuffer), coord);
+    uint triangle_id = pix.r;
+
+    if (triangle_id == 0) {
+        imageStore(F32(push.out_image), coord, vec4(0.0, 0.0, 0.0, 1.0));
+        return;
+    }
+
+    DrawData draw = push.draw_data_buffer.draw_data[pix.g];
+    Material material = push.material_buffer.materials[draw.material_idx];
+
+    // fetch the 3 vertex indices for this triangle
+    uint tri_idx = triangle_id - 1;
+    uint i0 = push.index_buffer.indices[tri_idx * 3 + 0];
+    uint i1 = push.index_buffer.indices[tri_idx * 3 + 1];
+    uint i2 = push.index_buffer.indices[tri_idx * 3 + 2];
+
+    // fetch and transform vertex positions to clip space
+    mat4 transform = push.proj_view_matrix * draw.transform;
+
+    vec3 p0 = vec3(push.vertex_buffer.positions[i0 * 3 + 0], push.vertex_buffer.positions[i0 * 3 + 1], push.vertex_buffer.positions[i0 * 3 + 2]);
+    vec3 p1 = vec3(push.vertex_buffer.positions[i1 * 3 + 0], push.vertex_buffer.positions[i1 * 3 + 1], push.vertex_buffer.positions[i1 * 3 + 2]);
+    vec3 p2 = vec3(push.vertex_buffer.positions[i2 * 3 + 0], push.vertex_buffer.positions[i2 * 3 + 1], push.vertex_buffer.positions[i2 * 3 + 2]);
+
+    vec4 clip0 = transform * vec4(p0, 1.0);
+    vec4 clip1 = transform * vec4(p1, 1.0);
+    vec4 clip2 = transform * vec4(p2, 1.0);
+
+    // clip space -> screen space | (NDC [-1,1] -> pixel [0, size])
+    vec2 s0 = (clip0.xy / clip0.w * 0.5 + 0.5) * vec2(size);
+    vec2 s1 = (clip1.xy / clip1.w * 0.5 + 0.5) * vec2(size);
+    vec2 s2 = (clip2.xy / clip2.w * 0.5 + 0.5) * vec2(size);
+
+    // screen-space barycentrics
+    // https://en.wikipedia.org/wiki/Barycentric_coordinate_system
+    // https://en.wikipedia.org/wiki/Cramer%27s_rule
+    vec2 pixel = vec2(coord) + 0.5;
+    vec2 v0 = s1 - s0;
+    vec2 v1 = s2 - s0;
+    vec2 v2 = pixel - s0;
+
+    float d00 = dot(v0, v0);
+    float d01 = dot(v0, v1);
+    float d11 = dot(v1, v1);
+    float d20 = dot(v2, v0);
+    float d21 = dot(v2, v1);
+    float denom = d00 * d11 - d01 * d01;
+    float bv = (d11 * d20 - d01 * d21) / denom;
+    float bw = (d00 * d21 - d01 * d20) / denom;
+    float bu = 1.0 - bv - bw;
+
+    // perspective-correct interpolation
+    float inv_w0 = 1.0 / clip0.w;
+    float inv_w1 = 1.0 / clip1.w;
+    float inv_w2 = 1.0 / clip2.w;
+    float persp_w = 1.0 / (bu * inv_w0 + bv * inv_w1 + bw * inv_w2);
+    vec3 bary = vec3(bu * inv_w0, bv * inv_w1, bw * inv_w2) * persp_w;
+
+    // interpolate things you need
+    vec2 uv0 = vec2(push.uv_buffer.uvs[i0 * 2 + 0], push.uv_buffer.uvs[i0 * 2 + 1]);
+    vec2 uv1 = vec2(push.uv_buffer.uvs[i1 * 2 + 0], push.uv_buffer.uvs[i1 * 2 + 1]);
+    vec2 uv2 = vec2(push.uv_buffer.uvs[i2 * 2 + 0], push.uv_buffer.uvs[i2 * 2 + 1]);
+    vec2 uv = bary.x * uv0 + bary.y * uv1 + bary.z * uv2;
+
+    imageStore(F32(push.out_image), coord, vec4(uv, 0.0, 1.0));
+}

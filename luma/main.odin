@@ -79,7 +79,7 @@ main :: proc() {
 			fragment_shader = "visbuffer.frag",
 			raster = {primitive_topology = .TRIANGLE_LIST},
 			push_constant_size = size_of(Visbuffer_Push),
-			color_attachments = {{format = .R32_UINT}},
+			color_attachments = {{format = .R32G32_UINT}},
 			depth_test = Depth_Test {
 				enable_depth_write = true,
 				compare_op = .LESS_OR_EQUAL,
@@ -88,8 +88,24 @@ main :: proc() {
 		},
 	)
 
+	PBRPush :: struct {
+		proj_view_matrix: glsl.mat4,
+		visbuffer:        u32,
+		out_image:        u32,
+		index_buffer:     vk.DeviceAddress,
+		vertex_buffer:    vk.DeviceAddress,
+		draw_data_buffer: vk.DeviceAddress,
+		normal_buffer:    vk.DeviceAddress,
+		uv_buffer:        vk.DeviceAddress,
+		material_buffer:  vk.DeviceAddress,
+	}
+	pbr_pipeline := pipeline_manager_add_compute(
+		&pipeline_manager,
+		{name = "pbr", shader = "pbr.comp", push_constant_size = size_of(PBRPush)},
+	)
+
 	Present_Push :: struct {
-		visbuffer_idx: u32,
+		draw_image: u32,
 	}
 	present_pipeline := pipeline_manager_add_raster(
 		&pipeline_manager,
@@ -115,8 +131,19 @@ main :: proc() {
 		{
 			width = window.width,
 			height = window.height,
-			format = .R32_UINT,
+			format = .R32G32_UINT,
 			usage = {.COLOR_ATTACHMENT, .TRANSFER_SRC, .STORAGE},
+			memory = .GPU_ONLY,
+			register_bindless = true,
+		},
+	)
+	draw_image := create_image(
+		&device,
+		{
+			width = window.width,
+			height = window.height,
+			format = .R32G32B32A32_SFLOAT,
+			usage = {.TRANSFER_SRC, .STORAGE},
 			memory = .GPU_ONLY,
 			register_bindless = true,
 		},
@@ -131,7 +158,7 @@ main :: proc() {
 			memory = .GPU_ONLY,
 		},
 	)
-	default_sampler: vk.Sampler
+	nearest_clamp_sampler: vk.Sampler
 	sampler_ci := vk.SamplerCreateInfo {
 		sType        = .SAMPLER_CREATE_INFO,
 		magFilter    = .NEAREST,
@@ -144,12 +171,14 @@ main :: proc() {
 		maxLod       = 0.0,
 		borderColor  = .INT_OPAQUE_BLACK,
 	}
-	chk(vk.CreateSampler(device.device, &sampler_ci, nil, &default_sampler))
-	bindless_register_sampler(&device, default_sampler)
+	chk(vk.CreateSampler(device.device, &sampler_ci, nil, &nearest_clamp_sampler))
+	bindless_register_sampler(&device, nearest_clamp_sampler)
 
 	defer {
-		if default_sampler != 0 {vk.DestroySampler(device.device, default_sampler, nil)}
+		if nearest_clamp_sampler !=
+		   0 {vk.DestroySampler(device.device, nearest_clamp_sampler, nil)}
 		destroy_image(&device, visbuffer)
+		destroy_image(&device, draw_image)
 		destroy_image(&device, depth_image)
 	}
 
@@ -194,6 +223,13 @@ main :: proc() {
 				image = &depth_image,
 				dst_stage = {.LATE_FRAGMENT_TESTS},
 				dst_access = {.DEPTH_STENCIL_ATTACHMENT_WRITE},
+			},
+			{
+				image = &draw_image,
+				src_stage = {.FRAGMENT_SHADER},
+				src_access = {.SHADER_STORAGE_READ},
+				dst_stage = {.COMPUTE_SHADER},
+				dst_access = {.SHADER_STORAGE_WRITE},
 			},
 		)
 
@@ -268,6 +304,32 @@ main :: proc() {
 				image = &visbuffer,
 				src_stage = {.COLOR_ATTACHMENT_OUTPUT},
 				src_access = {.COLOR_ATTACHMENT_WRITE},
+				dst_stage = {.COMPUTE_SHADER},
+				dst_access = {.SHADER_STORAGE_READ},
+			},
+		)
+
+		pbr_pc := PBRPush {
+			proj_view_matrix = camera.proj * camera_get_view(&camera),
+			visbuffer        = visbuffer.bindless_idx,
+			out_image        = draw_image.bindless_idx,
+			index_buffer     = scene.index_buffer.device_address,
+			vertex_buffer    = scene.position_buffer.device_address,
+			draw_data_buffer = scene.draw_data_buffer.device_address,
+			normal_buffer    = scene.normal_buffer.device_address,
+			uv_buffer        = scene.uv_buffer.device_address,
+			material_buffer  = scene.material_buffer.device_address,
+		}
+		vk.CmdPushConstants(cb, pbr_pipeline.layout, {.COMPUTE}, 0, size_of(PBRPush), &pbr_pc)
+		bind_compute_pipeline(cb, pbr_pipeline)
+		vk.CmdDispatch(cb, window.width / 8, window.height / 8, 1)
+
+		image_barriers(
+			cb,
+			{
+				image = &draw_image,
+				src_stage = {.COMPUTE_SHADER},
+				src_access = {.SHADER_STORAGE_WRITE},
 				dst_stage = {.FRAGMENT_SHADER},
 				dst_access = {.SHADER_STORAGE_READ},
 			},
@@ -294,7 +356,7 @@ main :: proc() {
 		vk.CmdSetScissorWithCount(cb, 1, &scissor)
 
 		present_pc := Present_Push {
-			visbuffer_idx = visbuffer.bindless_index,
+			draw_image = draw_image.bindless_idx,
 		}
 		vk.CmdPushConstants(
 			cb,
