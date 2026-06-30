@@ -77,7 +77,7 @@ main :: proc() {
 			name = "visbuffer",
 			vertex_shader = "visbuffer.vert",
 			fragment_shader = "visbuffer.frag",
-			raster = {primitive_topology = .TRIANGLE_LIST},
+			raster = {primitive_topology = .TRIANGLE_LIST, front_face = .CLOCKWISE},
 			push_constant_size = size_of(Visbuffer_Push),
 			color_attachments = {{format = .R32G32_UINT}},
 			depth_test = Depth_Test {
@@ -88,8 +88,9 @@ main :: proc() {
 		},
 	)
 
-	PBRPush :: struct {
+	ShadingPush :: struct {
 		proj_view_matrix: glsl.mat4,
+		camera_position:  glsl.vec3,
 		visbuffer:        u32,
 		out_image:        u32,
 		index_buffer:     vk.DeviceAddress,
@@ -98,10 +99,11 @@ main :: proc() {
 		normal_buffer:    vk.DeviceAddress,
 		uv_buffer:        vk.DeviceAddress,
 		material_buffer:  vk.DeviceAddress,
+		texture_sampler:  u32,
 	}
-	pbr_pipeline := pipeline_manager_add_compute(
+	shading_pipeline := pipeline_manager_add_compute(
 		&pipeline_manager,
-		{name = "pbr", shader = "pbr.comp", push_constant_size = size_of(PBRPush)},
+		{name = "shading", shader = "shading.comp", push_constant_size = size_of(ShadingPush)},
 	)
 
 	Present_Push :: struct {
@@ -134,7 +136,7 @@ main :: proc() {
 			format = .R32G32_UINT,
 			usage = {.COLOR_ATTACHMENT, .TRANSFER_SRC, .STORAGE},
 			memory = .GPU_ONLY,
-			register_bindless = true,
+			register_bindless = .Storage,
 		},
 	)
 	draw_image := create_image(
@@ -145,7 +147,7 @@ main :: proc() {
 			format = .R32G32B32A32_SFLOAT,
 			usage = {.TRANSFER_SRC, .STORAGE},
 			memory = .GPU_ONLY,
-			register_bindless = true,
+			register_bindless = .Storage,
 		},
 	)
 	depth_image := create_image(
@@ -158,25 +160,26 @@ main :: proc() {
 			memory = .GPU_ONLY,
 		},
 	)
-	nearest_clamp_sampler: vk.Sampler
-	sampler_ci := vk.SamplerCreateInfo {
+	texture_sampler: vk.Sampler
+	texture_sampler_ci := vk.SamplerCreateInfo {
 		sType        = .SAMPLER_CREATE_INFO,
-		magFilter    = .NEAREST,
-		minFilter    = .NEAREST,
-		addressModeU = .CLAMP_TO_EDGE,
-		addressModeV = .CLAMP_TO_EDGE,
-		addressModeW = .CLAMP_TO_EDGE,
+		magFilter    = .LINEAR,
+		minFilter    = .LINEAR,
+		addressModeU = .REPEAT,
+		addressModeV = .REPEAT,
+		addressModeW = .REPEAT,
 		mipLodBias   = 0.0,
 		minLod       = 0.0,
 		maxLod       = 0.0,
 		borderColor  = .INT_OPAQUE_BLACK,
 	}
-	chk(vk.CreateSampler(device.device, &sampler_ci, nil, &nearest_clamp_sampler))
-	bindless_register_sampler(&device, nearest_clamp_sampler)
+	chk(vk.CreateSampler(device.device, &texture_sampler_ci, nil, &texture_sampler))
+	texutre_sampler_idx := bindless_register_sampler(&device, texture_sampler)
 
 	defer {
-		if nearest_clamp_sampler !=
-		   0 {vk.DestroySampler(device.device, nearest_clamp_sampler, nil)}
+		if texture_sampler != 0 {
+			vk.DestroySampler(device.device, texture_sampler, nil)
+		}
 		destroy_image(&device, visbuffer)
 		destroy_image(&device, draw_image)
 		destroy_image(&device, depth_image)
@@ -309,8 +312,9 @@ main :: proc() {
 			},
 		)
 
-		pbr_pc := PBRPush {
+		shading_pc := ShadingPush {
 			proj_view_matrix = camera.proj * camera_get_view(&camera),
+			camera_position  = camera.position,
 			visbuffer        = visbuffer.bindless_idx,
 			out_image        = draw_image.bindless_idx,
 			index_buffer     = scene.index_buffer.device_address,
@@ -319,9 +323,10 @@ main :: proc() {
 			normal_buffer    = scene.normal_buffer.device_address,
 			uv_buffer        = scene.uv_buffer.device_address,
 			material_buffer  = scene.material_buffer.device_address,
+			texture_sampler  = texutre_sampler_idx,
 		}
-		vk.CmdPushConstants(cb, pbr_pipeline.layout, {.COMPUTE}, 0, size_of(PBRPush), &pbr_pc)
-		bind_compute_pipeline(cb, pbr_pipeline)
+		vk.CmdPushConstants(cb, shading_pipeline.layout, {.COMPUTE}, 0, size_of(ShadingPush), &shading_pc)
+		bind_compute_pipeline(cb, shading_pipeline)
 		vk.CmdDispatch(cb, window.width / 8, window.height / 8, 1)
 
 		image_barriers(

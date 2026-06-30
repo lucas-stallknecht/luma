@@ -1,5 +1,6 @@
 package luma
 
+import "base:intrinsics"
 import vk "vendor:vulkan"
 
 Image :: struct {
@@ -18,7 +19,11 @@ Image_Create_Desc :: struct {
 	usage:             vk.ImageUsageFlags,
 	memory:            Memory_Preset,
 	// registers into the bindless set on creation, fills Image.bindless_index
-	register_bindless: bool,
+	register_bindless: enum {
+		None,
+		Storage,
+		Texture,
+	},
 }
 
 create_image :: proc(device: ^Device, desc: Image_Create_Desc) -> Image {
@@ -68,9 +73,49 @@ create_image :: proc(device: ^Device, desc: Image_Create_Desc) -> Image {
 	}
 	chk(vk.CreateImageView(device.device, &view_ci, nil, &out.view))
 
-	if desc.register_bindless {
+	#partial switch desc.register_bindless {
+	case .Storage:
 		out.bindless_idx = bindless_register_storage_image(device, out.view, out.format)
+	case .Texture:
+		out.bindless_idx = bindless_register_texture(device, out.view)
 	}
+
+	return out
+}
+
+create_and_upload_image :: proc(
+	device: ^Device,
+	temp_pool: ^[dynamic]Buffer,
+	cb: vk.CommandBuffer,
+	data: rawptr,
+	data_size: vk.DeviceSize,
+	desc: Image_Create_Desc,
+) -> Image {
+	desc_copy := desc
+	desc_copy.usage += {.TRANSFER_DST}
+	out := create_image(device, desc_copy)
+
+	staging := create_buffer(
+		device,
+		{size = data_size, usage = {.TRANSFER_SRC}, memory = .CPU_UPLOAD},
+	)
+	append(temp_pool, staging)
+
+	mapped: rawptr
+	vk.MapMemory(device.device, staging.memory, 0, data_size, {}, &mapped)
+	intrinsics.mem_copy(mapped, data, int(data_size))
+	vk.UnmapMemory(device.device, staging.memory)
+
+	image_barriers(
+		cb,
+		{image = &out, dst_stage = {.TRANSFER}, dst_access = {.TRANSFER_WRITE}},
+	)
+
+	copy_region := vk.BufferImageCopy {
+		imageSubresource = {aspectMask = {.COLOR}, layerCount = 1},
+		imageExtent      = {desc.width, desc.height, 1},
+	}
+	vk.CmdCopyBufferToImage(cb, staging.buffer, out.image, .GENERAL, 1, &copy_region)
 
 	return out
 }

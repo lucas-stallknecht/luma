@@ -3,8 +3,10 @@ package luma
 import "core:fmt"
 import "core:math/linalg/glsl"
 import "core:os"
+import "core:path/filepath"
 import "core:slice"
 import "core:strings"
+import stbi "vendor:stb/image"
 import vk "vendor:vulkan"
 
 Scene :: struct {
@@ -17,6 +19,7 @@ Scene :: struct {
 	material_buffer:     Buffer,
 	draw_data_buffer:    Buffer,
 	draw_command_buffer: Buffer,
+	texture_images:      []Image,
 }
 
 Header :: struct {
@@ -44,10 +47,10 @@ Material :: struct {
 }
 
 Material_GPU :: struct #align (16) {
-	base_color:                 glsl.vec3,
-	base_color_tex_idx:         i32,
-	metallic_roughness_tex_idx: i32,
-	normal_tex_idx:             i32,
+	base_color:             glsl.vec3,
+	base_color_tex:         i32,
+	metallic_roughness_tex: i32,
+	normal_tex:             i32,
 }
 
 Draw_Data :: struct #align (16) {
@@ -144,6 +147,37 @@ scene_init :: proc(scene: ^Scene, device: ^Device, path: string) {
 	textures := parse_textures(string(textures_bytes))
 	defer delete(textures)
 
+	scene.texture_images = make([]Image, len(textures))
+	file_dir := filepath.dir(path, context.temp_allocator)
+	for tex_name, i in textures {
+		tex_path, _ := filepath.join({file_dir, tex_name}, context.temp_allocator)
+		tex_path_cstr := strings.clone_to_cstring(tex_path, context.temp_allocator)
+
+		tex_width, tex_height, tex_channels: i32
+		tex_data := stbi.load(tex_path_cstr, &tex_width, &tex_height, &tex_channels, 4)
+		if tex_data == nil {
+			fmt.println("[Scene] Failed to load texture", tex_path)
+			continue
+		}
+		defer stbi.image_free(tex_data)
+
+		scene.texture_images[i] = create_and_upload_image(
+			device,
+			&temp_pool,
+			cb,
+			tex_data,
+			vk.DeviceSize(tex_width * tex_height * 4),
+			{
+				width = u32(tex_width),
+				height = u32(tex_height),
+				format = .R8G8B8A8_SRGB,
+				usage = {.SAMPLED},
+				memory = .GPU_ONLY,
+				register_bindless = .Texture,
+			},
+		)
+	}
+
 	// materials
 	materials_bytes := data[header.materials_offset:header.materials_offset +
 	header.materials_size]
@@ -152,10 +186,19 @@ scene_init :: proc(scene: ^Scene, device: ^Device, path: string) {
 	materials_gpu := make([]Material_GPU, len(materials))
 	for mat, i in materials {
 		materials_gpu[i] = {
-			base_color                 = mat.base_color,
-			base_color_tex_idx         = mat.base_color_tex_idx,
-			metallic_roughness_tex_idx = mat.metallic_roughness_tex_idx,
-			normal_tex_idx             = mat.normal_tex_idx,
+			base_color             = mat.base_color,
+			base_color_tex         = get_texture_bindless_idx(
+				scene.texture_images,
+				mat.base_color_tex_idx,
+			),
+			normal_tex             = get_texture_bindless_idx(
+				scene.texture_images,
+				mat.normal_tex_idx,
+			),
+			metallic_roughness_tex = get_texture_bindless_idx(
+				scene.texture_images,
+				mat.metallic_roughness_tex_idx,
+			),
 		}
 	}
 	defer delete(materials_gpu)
@@ -246,6 +289,10 @@ scene_cleanup :: proc(scene: ^Scene, device: ^Device) {
 	destroy_buffer(device, &scene.material_buffer)
 	destroy_buffer(device, &scene.draw_data_buffer)
 	destroy_buffer(device, &scene.draw_command_buffer)
+	for image in scene.texture_images {
+		destroy_image(device, image)
+	}
+	delete(scene.texture_images)
 }
 
 // textures are stored as a comma-separated list of quoted names, e.g. `"a","b"`
@@ -283,4 +330,14 @@ make_transform :: proc(t: [16]f32) -> glsl.mat4 {
 		t[14],
 		t[15],
 	}
+}
+
+@(private = "file")
+get_texture_bindless_idx :: proc(images: []Image, idx: i32) -> i32 {
+	if idx == -1 {
+		return -1
+	}
+
+	image := images[idx]
+	return i32(image.bindless_idx) if image.image != 0 else -1
 }
