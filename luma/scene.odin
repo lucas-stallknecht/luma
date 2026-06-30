@@ -15,6 +15,7 @@ Scene :: struct {
 	index_buffer:        Buffer,
 	position_buffer:     Buffer,
 	normal_buffer:       Buffer,
+	tangent_buffer:      Buffer,
 	uv_buffer:           Buffer,
 	material_buffer:     Buffer,
 	draw_data_buffer:    Buffer,
@@ -27,6 +28,8 @@ Header :: struct {
 	positions_size:     u32,
 	normals_offset:     u32,
 	normals_size:       u32,
+	tangents_offset:    u32,
+	tangents_size:      u32,
 	uvs_offset:         u32,
 	uvs_size:           u32,
 	indices_offset:     u32,
@@ -49,8 +52,8 @@ Material :: struct {
 Material_GPU :: struct #align (16) {
 	base_color:             glsl.vec3,
 	base_color_tex:         i32,
-	metallic_roughness_tex: i32,
 	normal_tex:             i32,
+	metallic_roughness_tex: i32,
 }
 
 Draw_Data :: struct #align (16) {
@@ -113,6 +116,20 @@ scene_init :: proc(scene: ^Scene, device: ^Device, path: string) {
 		},
 	)
 
+	tangents_bytes := data[header.tangents_offset:header.tangents_offset + header.tangents_size]
+	tangents := slice.reinterpret([]f32, tangents_bytes)
+	scene.tangent_buffer = create_and_upload_buffer(
+		device,
+		&temp_pool,
+		cb,
+		raw_data(tangents),
+		{
+			size = vk.DeviceSize(header.tangents_size),
+			usage = {.STORAGE_BUFFER, .SHADER_DEVICE_ADDRESS},
+			memory = .GPU_ONLY,
+		},
+	)
+
 	uvs_bytes := data[header.uvs_offset:header.uvs_offset + header.uvs_size]
 	uvs := slice.reinterpret([]f32, uvs_bytes)
 	scene.uv_buffer = create_and_upload_buffer(
@@ -142,6 +159,18 @@ scene_init :: proc(scene: ^Scene, device: ^Device, path: string) {
 		},
 	)
 
+	// pre-scan materials to identify which texture indices are normal maps (linear data)
+	materials_bytes := data[header.materials_offset:header.materials_offset +
+	header.materials_size]
+	materials := slice.reinterpret([]Material, materials_bytes)
+
+	normal_map_indices := make(map[i32]bool, context.temp_allocator)
+	for mat in materials {
+		if mat.normal_tex_idx >= 0 {
+			normal_map_indices[mat.normal_tex_idx] = true
+		}
+	}
+
 	// textures
 	textures_bytes := data[header.textures_offset:header.textures_offset + header.textures_size]
 	textures := parse_textures(string(textures_bytes))
@@ -161,6 +190,11 @@ scene_init :: proc(scene: ^Scene, device: ^Device, path: string) {
 		}
 		defer stbi.image_free(tex_data)
 
+		format: vk.Format = .R8G8B8A8_SRGB
+		if i32(i) in normal_map_indices {
+			format = .R8G8B8A8_UNORM
+		}
+
 		scene.texture_images[i] = create_and_upload_image(
 			device,
 			&temp_pool,
@@ -170,18 +204,13 @@ scene_init :: proc(scene: ^Scene, device: ^Device, path: string) {
 			{
 				width = u32(tex_width),
 				height = u32(tex_height),
-				format = .R8G8B8A8_SRGB,
+				format = format,
 				usage = {.SAMPLED},
 				memory = .GPU_ONLY,
 				register_bindless = .Texture,
 			},
 		)
 	}
-
-	// materials
-	materials_bytes := data[header.materials_offset:header.materials_offset +
-	header.materials_size]
-	materials := slice.reinterpret([]Material, materials_bytes)
 
 	materials_gpu := make([]Material_GPU, len(materials))
 	for mat, i in materials {
@@ -284,6 +313,7 @@ scene_init :: proc(scene: ^Scene, device: ^Device, path: string) {
 scene_cleanup :: proc(scene: ^Scene, device: ^Device) {
 	destroy_buffer(device, &scene.position_buffer)
 	destroy_buffer(device, &scene.normal_buffer)
+	destroy_buffer(device, &scene.tangent_buffer)
 	destroy_buffer(device, &scene.uv_buffer)
 	destroy_buffer(device, &scene.index_buffer)
 	destroy_buffer(device, &scene.material_buffer)

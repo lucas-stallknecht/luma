@@ -8,7 +8,7 @@ import numpy as np
 from mathutils import Vector
 from numpy.typing import NDArray
 
-HEADER_STRUCT = struct.Struct("14i")
+HEADER_STRUCT = struct.Struct("16i")
 MATERIAL_STRUCT = struct.Struct("3f 3i")
 RENDERABLE_STRUCT = struct.Struct("16f 3i")
 axis_fix = np.array(
@@ -42,6 +42,7 @@ print("\n", str(datetime.datetime.now()))
 
 positions: list[Vector] = []
 normals: list[Vector] = []
+tangents: list[Vector] = []
 uvs: list[Vector] = []
 indices: list[int] = []
 
@@ -171,6 +172,7 @@ for obj_idx, obj in enumerate(bpy.context.selected_objects):
     if not mesh.uv_layers.active:
         continue
     uv_layer = mesh.uv_layers.active.data if mesh.uv_layers else None
+    mesh.calc_tangents()
 
     # object transform
     # transform = np.array(obj.matrix_world, dtype=np.float32)
@@ -209,6 +211,7 @@ for obj_idx, obj in enumerate(bpy.context.selected_objects):
                     if mesh.has_custom_normals
                     else mesh.vertices[v_idx].normal
                 )
+                tangents.append(Vector((*loop.tangent, loop.bitangent_sign)))
 
                 if uv_layer:
                     uvs.append(uv_layer[loop_idx].uv.copy())
@@ -237,12 +240,10 @@ for obj_idx, obj in enumerate(bpy.context.selected_objects):
         indices.extend(tri_indices)
         offset += index_count
 
-print(materials)
-print(textures)
-
 # final packed buffers
 position_buffer = np.array(positions, dtype=np.float32)
 normal_buffer = np.array(normals, dtype=np.float32)
+tangent_buffer = np.array(tangents, dtype=np.float32)
 uv_buffer = np.array(uvs, dtype=np.float32)
 index_buffer = np.array(indices, dtype=np.uint32)
 
@@ -266,6 +267,7 @@ print("Draw calls:", len(renderables))
 # -- associated byte data
 # positions   (vec3)
 # normals     (vec3)
+# tangents    (vec3)
 # uvs         (vec2)
 # indices     (u32)
 # textures    (strings split by ,)
@@ -304,6 +306,7 @@ for r in renderables:
 
 pos_bytes = position_buffer.tobytes()
 normal_bytes = normal_buffer.tobytes()
+tangent_bytes = tangent_buffer.tobytes()
 uv_bytes = uv_buffer.tobytes()
 index_bytes = index_buffer.tobytes()
 
@@ -320,6 +323,10 @@ with open(filename, "wb") as f:
     normals_offset = f.tell()
     _ = f.write(normal_bytes)
     normals_size = len(normal_bytes)
+
+    tangents_offset = f.tell()
+    _ = f.write(tangent_bytes)
+    tangents_size = len(tangent_bytes)
 
     uvs_offset = f.tell()
     _ = f.write(uv_bytes)
@@ -348,6 +355,8 @@ with open(filename, "wb") as f:
             positions_size,
             normals_offset,
             normals_size,
+            tangents_offset,
+            tangents_size,
             uvs_offset,
             uvs_size,
             indices_offset,

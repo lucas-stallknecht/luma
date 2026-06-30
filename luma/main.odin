@@ -100,6 +100,7 @@ main :: proc() {
 		vertex_buffer:    vk.DeviceAddress,
 		draw_data_buffer: vk.DeviceAddress,
 		normal_buffer:    vk.DeviceAddress,
+		tangent_buffer:   vk.DeviceAddress,
 		uv_buffer:        vk.DeviceAddress,
 		material_buffer:  vk.DeviceAddress,
 		texture_sampler:  u32,
@@ -285,7 +286,7 @@ main :: proc() {
 			draw_data_buffer = scene.draw_data_buffer.device_address,
 			uv_buffer        = scene.uv_buffer.device_address,
 			material_buffer  = scene.material_buffer.device_address,
-			texture_sampler = texture_sampler_idx,
+			texture_sampler  = texture_sampler_idx,
 		}
 		vk.CmdPushConstants(
 			cb,
@@ -327,11 +328,19 @@ main :: proc() {
 			vertex_buffer    = scene.position_buffer.device_address,
 			draw_data_buffer = scene.draw_data_buffer.device_address,
 			normal_buffer    = scene.normal_buffer.device_address,
+			tangent_buffer   = scene.tangent_buffer.device_address,
 			uv_buffer        = scene.uv_buffer.device_address,
 			material_buffer  = scene.material_buffer.device_address,
 			texture_sampler  = texture_sampler_idx,
 		}
-		vk.CmdPushConstants(cb, shading_pipeline.layout, {.COMPUTE}, 0, size_of(ShadingPush), &shading_pc)
+		vk.CmdPushConstants(
+			cb,
+			shading_pipeline.layout,
+			{.COMPUTE},
+			0,
+			size_of(ShadingPush),
+			&shading_pc,
+		)
 		bind_compute_pipeline(cb, shading_pipeline)
 		vk.CmdDispatch(cb, window.width / 8, window.height / 8, 1)
 

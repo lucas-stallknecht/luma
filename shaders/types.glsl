@@ -29,6 +29,9 @@ layout(buffer_reference, std430) readonly buffer DrawDataBuffer {
 layout(buffer_reference, buffer_reference_align = 4, scalar) readonly buffer NormalBuffer {
     vec3 normals[];
 };
+layout(buffer_reference, std430) readonly buffer TangentBuffer {
+    vec4 tangents[];
+};
 layout(buffer_reference, buffer_reference_align = 16) readonly buffer UvBuffer {
     vec2 uvs[];
 };

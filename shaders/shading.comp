@@ -11,6 +11,7 @@ layout(push_constant) uniform PushConstants {
     VertexBuffer vertex_buffer;
     DrawDataBuffer draw_data_buffer;
     NormalBuffer normal_buffer;
+    TangentBuffer tangent_buffer;
     UvBuffer uv_buffer;
     MaterialBuffer material_buffer;
     uint texture_sampler;
@@ -45,6 +46,7 @@ void main() {
     }
 
     DrawData draw = push.draw_data_buffer.draw_data[pix.g];
+    Material material = push.material_buffer.materials[draw.material_idx];
 
     uint tri_idx = triangle_id - 1;
     uint i0 = push.index_buffer.indices[tri_idx * 3 + 0];
@@ -74,13 +76,36 @@ void main() {
     vec2 uv = bary.x * uv0 + bary.y * uv1 + bary.z * uv2;
     uv.y = 1.0 - uv.y;
 
-    Material material = push.material_buffer.materials[draw.material_idx];
+    vec3 n0 = push.normal_buffer.normals[i0];
+    vec3 n1 = push.normal_buffer.normals[i1];
+    vec3 n2 = push.normal_buffer.normals[i2];
+    vec3 normal = normalize(vec3(bary.x * n0 + bary.y * n1 + bary.z * n2));
+
+    if (material.normal_tex >= 0) {
+        vec4 t0 = push.tangent_buffer.tangents[i0];
+        vec4 t1 = push.tangent_buffer.tangents[i1];
+        vec4 t2 = push.tangent_buffer.tangents[i2];
+        vec3 tangent = normalize(bary.x * t0.xyz + bary.y * t1.xyz + bary.z * t2.xyz);
+        vec3 bitangent = cross(normal, tangent) * t0.w;
+
+        vec3 tex_normal = texture(TEX(material.normal_tex, push.texture_sampler), uv).rgb;
+        tex_normal = tex_normal * 2.0 - 1.0;
+
+        mat3 TBN = mat3(tangent, bitangent, normal);
+        normal = normalize(TBN * tex_normal);
+    }
+    // world normal
+    normal = normalize(mat3(draw.transform) * normal);
+
     vec3 color = material.base_color;
 
     if (material.base_color_tex >= 0) {
         vec4 tex_color = texture(TEX(material.base_color_tex, push.texture_sampler), uv);
         color.rgb *= tex_color.rgb;
     }
+
+    float diffuse = dot(normal, normalize(vec3(0.1, 1.0, -0.1)));
+    color *= diffuse;
 
     imageStore(F32(push.out_image), coord, vec4(color, 1.0));
 }
