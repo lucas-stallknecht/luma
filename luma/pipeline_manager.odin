@@ -206,7 +206,7 @@ bind_raster_pipeline :: proc(cb: vk.CommandBuffer, pipeline: ^Raster_Pipeline) {
 create_raster_pipeline :: proc(m: ^Pipeline_Manager, pipeline: ^Raster_Pipeline) {
 	info := &pipeline.info
 
-	// If cached SPIR-V is empty, try compiling the shaders. When performing
+	// if cached SPIR-V is empty, try compiling the shaders. When performing
 	// a reload we pre-populate cached_spirv, so this avoids recompiling.
 	if len(pipeline.cached_spirv.vertex) == 0 {
 		vertex_spv, vertex_ok := compile_and_load_spirv(m, info.vertex_shader)

@@ -6,6 +6,7 @@ import "core:math/linalg/glsl"
 import "core:mem"
 import "vendor:glfw"
 import vk "vendor:vulkan"
+import mu "vendor:microui"
 
 device_selection_fn :: proc(idx: int, properties: vk.PhysicalDeviceProperties2) -> bool {
 	return idx == 0
@@ -95,7 +96,7 @@ main :: proc() {
 		},
 	)
 
-	ShadingPush :: struct {
+	Shading_Push :: struct {
 		frame_data:       vk.DeviceAddress,
 		visbuffer:        u32,
 		out_image:        u32,
@@ -109,7 +110,7 @@ main :: proc() {
 	}
 	shading_pipeline := pipeline_manager_add_compute(
 		&pipeline_manager,
-		{name = "shading", shader = "shading.comp", push_constant_size = size_of(ShadingPush)},
+		{name = "shading", shader = "shading.comp", push_constant_size = size_of(Shading_Push)},
 	)
 
 	Present_Push :: struct {
@@ -126,6 +127,13 @@ main :: proc() {
 			color_attachments = {{format = swapchain.format}},
 		},
 	)
+
+	// mu.Context alone is ~256KB, keep it off the stack
+	ui := new(Ui)
+	defer free(ui)
+	ui_init(ui, &device, &pipeline_manager, swapchain.format)
+	defer ui_cleanup(ui, &device)
+	window_bind_ui(&window, &ui.ctx)
 
 	camera := create_camera()
 	camera_update_proj(&camera, f32(window.width) / f32(window.height))
@@ -192,7 +200,7 @@ main :: proc() {
 		light_color:          glsl.vec3,
 		_pad1:                f32,
 	}
-	light_dir := la.normalize(glsl.vec3{0.1, 1.0, -0.1})
+	light_dir := glsl.vec3{0.1, 1.0, -0.1}
 	light_color := glsl.vec3{1.0, 1.0, 1.0}
 
 	// one buffer per in-flight command buffer slot, so the CPU never overwrites frame
@@ -257,6 +265,26 @@ main :: proc() {
 		width := window.width
 		height := window.height
 
+		// ui
+		mu.begin(&ui.ctx)
+		if mu.window(&ui.ctx, "Debug", {x = 20, y = 20, w = 260, h = 280}) {
+			fps := 1.0 / dt if dt > 0 else 0
+			mu.layout_row(&ui.ctx, {-1}, 0)
+			mu.label(&ui.ctx, fmt.tprintf("%.2f ms (%.0f fps)", dt * 1000, fps))
+
+			mu.label(&ui.ctx, "Light direction")
+			mu.layout_row(&ui.ctx, {-1}, 0)
+			mu.slider(&ui.ctx, &light_dir.x, -1, 1)
+			mu.slider(&ui.ctx, &light_dir.y, -1, 1)
+			mu.slider(&ui.ctx, &light_dir.z, -1, 1)
+
+			mu.label(&ui.ctx, "Light color")
+			mu.slider(&ui.ctx, &light_color.x, 0, 1)
+			mu.slider(&ui.ctx, &light_color.y, 0, 1)
+			mu.slider(&ui.ctx, &light_color.z, 0, 1)
+		}
+		mu.end(&ui.ctx)
+
 		// render loop
 		swapchain_image := swapchain_acquire_image(&swapchain)
 		handle, cb := command_handler_acquire(&device.command_handler)
@@ -267,7 +295,7 @@ main :: proc() {
 			inv_proj_view_matrix = la.inverse(proj_view),
 			camera_position      = camera.position,
 			texture_sampler      = texture_sampler_idx,
-			light_dir            = light_dir,
+			light_dir            = la.normalize(light_dir),
 			light_color          = light_color,
 		}
 		frame_data_buffer := &frame_data_buffers[handle.buffer_idx]
@@ -372,7 +400,7 @@ main :: proc() {
 			},
 		)
 
-		shading_pc := ShadingPush {
+		shading_pc := Shading_Push {
 			frame_data       = frame_data_buffer.device_address,
 			visbuffer        = visbuffer.bindless_idx,
 			out_image        = draw_image.bindless_idx,
@@ -389,7 +417,7 @@ main :: proc() {
 			shading_pipeline.layout,
 			{.COMPUTE},
 			0,
-			size_of(ShadingPush),
+			size_of(Shading_Push),
 			&shading_pc,
 		)
 		bind_compute_pipeline(cb, shading_pipeline)
@@ -406,7 +434,7 @@ main :: proc() {
 			},
 		)
 
-		// Render a fullscreen triangle that samples the visbuffer
+		// render a fullscreen triangle that samples the visbuffer
 		swap_color_attachments := vk.RenderingAttachmentInfo {
 			sType = .RENDERING_ATTACHMENT_INFO,
 			imageView = swapchain_image.view,
@@ -439,12 +467,16 @@ main :: proc() {
 		)
 		bind_raster_pipeline(cb, present_pipeline)
 		vk.CmdDraw(cb, 3, 1, 0, 0)
+
+		ui_render(ui, cb, handle.buffer_idx, width, height)
+
 		vk.CmdEndRendering(cb)
 
 		swapchain_barrier_to_present(cb, swapchain_image)
 
 		command_handler_submit(&device.command_handler, handle, true)
 		swapchain_present(&swapchain)
+		free_all(context.temp_allocator)
 	}
 
 	vk.DeviceWaitIdle(device.device)
