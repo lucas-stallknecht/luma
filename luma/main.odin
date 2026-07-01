@@ -1,6 +1,7 @@
 package luma
 
 import "core:fmt"
+import la "core:math/linalg"
 import "core:math/linalg/glsl"
 import "core:mem"
 import "vendor:glfw"
@@ -71,12 +72,11 @@ main :: proc() {
 	defer pipeline_manager_cleanup(&pipeline_manager)
 
 	Visbuffer_Push :: struct {
-		proj_view_matrix: glsl.mat4,
+		frame_data:       vk.DeviceAddress,
 		vertex_buffer:    vk.DeviceAddress,
 		draw_data_buffer: vk.DeviceAddress,
 		uv_buffer:        vk.DeviceAddress,
 		material_buffer:  vk.DeviceAddress,
-		texture_sampler:  u32,
 	}
 	visbuffer_pipeline := pipeline_manager_add_raster(
 		&pipeline_manager,
@@ -96,8 +96,7 @@ main :: proc() {
 	)
 
 	ShadingPush :: struct {
-		proj_view_matrix: glsl.mat4,
-		camera_position:  glsl.vec3,
+		frame_data:       vk.DeviceAddress,
 		visbuffer:        u32,
 		out_image:        u32,
 		index_buffer:     vk.DeviceAddress,
@@ -107,7 +106,6 @@ main :: proc() {
 		tangent_buffer:   vk.DeviceAddress,
 		uv_buffer:        vk.DeviceAddress,
 		material_buffer:  vk.DeviceAddress,
-		texture_sampler:  u32,
 	}
 	shading_pipeline := pipeline_manager_add_compute(
 		&pipeline_manager,
@@ -184,6 +182,42 @@ main :: proc() {
 	chk(vk.CreateSampler(device.device, &texture_sampler_ci, nil, &texture_sampler))
 	texture_sampler_idx := bindless_register_sampler(&device, texture_sampler)
 
+	Frame_Data :: struct {
+		proj_view_matrix:     glsl.mat4,
+		inv_proj_view_matrix: glsl.mat4,
+		camera_position:      glsl.vec3,
+		texture_sampler:      u32,
+		light_dir:            glsl.vec3,
+		_pad0:                f32,
+		light_color:          glsl.vec3,
+		_pad1:                f32,
+	}
+	light_dir := la.normalize(glsl.vec3{0.1, 1.0, -0.1})
+	light_color := glsl.vec3{1.0, 1.0, 1.0}
+
+	// one buffer per in-flight command buffer slot, so the CPU never overwrites frame
+	// data the GPU hasn't finished reading yet
+	frame_data_buffers: [MAX_COMMAND_BUFFERS]Buffer
+	frame_data_mapped: [MAX_COMMAND_BUFFERS]rawptr
+	for i in 0 ..< int(MAX_COMMAND_BUFFERS) {
+		frame_data_buffers[i] = create_buffer(
+			&device,
+			{
+				size = size_of(Frame_Data),
+				usage = {.STORAGE_BUFFER, .SHADER_DEVICE_ADDRESS},
+				memory = .CPU_UPLOAD,
+			},
+		)
+		vk.MapMemory(
+			device.device,
+			frame_data_buffers[i].memory,
+			0,
+			vk.DeviceSize(size_of(Frame_Data)),
+			{},
+			&frame_data_mapped[i],
+		)
+	}
+
 	defer {
 		if texture_sampler != 0 {
 			vk.DestroySampler(device.device, texture_sampler, nil)
@@ -191,6 +225,10 @@ main :: proc() {
 		destroy_image(&device, visbuffer)
 		destroy_image(&device, draw_image)
 		destroy_image(&device, depth_image)
+		for i in 0 ..< int(MAX_COMMAND_BUFFERS) {
+			vk.UnmapMemory(device.device, frame_data_buffers[i].memory)
+			destroy_buffer(&device, &frame_data_buffers[i])
+		}
 	}
 
 	last_frame_time: f64 = glfw.GetTime()
@@ -222,6 +260,18 @@ main :: proc() {
 		// render loop
 		swapchain_image := swapchain_acquire_image(&swapchain)
 		handle, cb := command_handler_acquire(&device.command_handler)
+
+		proj_view := camera.proj * camera_get_view(&camera)
+		frame_data := Frame_Data {
+			proj_view_matrix     = proj_view,
+			inv_proj_view_matrix = la.inverse(proj_view),
+			camera_position      = camera.position,
+			texture_sampler      = texture_sampler_idx,
+			light_dir            = light_dir,
+			light_color          = light_color,
+		}
+		frame_data_buffer := &frame_data_buffers[handle.buffer_idx]
+		mem.copy(frame_data_mapped[handle.buffer_idx], &frame_data, size_of(Frame_Data))
 
 		image_barriers(
 			cb,
@@ -285,12 +335,11 @@ main :: proc() {
 		vk.CmdSetScissorWithCount(cb, 1, &scissor)
 
 		push := Visbuffer_Push {
-			proj_view_matrix = camera.proj * camera_get_view(&camera),
+			frame_data       = frame_data_buffer.device_address,
 			vertex_buffer    = scene.position_buffer.device_address,
 			draw_data_buffer = scene.draw_data_buffer.device_address,
 			uv_buffer        = scene.uv_buffer.device_address,
 			material_buffer  = scene.material_buffer.device_address,
-			texture_sampler  = texture_sampler_idx,
 		}
 		vk.CmdPushConstants(
 			cb,
@@ -324,8 +373,7 @@ main :: proc() {
 		)
 
 		shading_pc := ShadingPush {
-			proj_view_matrix = camera.proj * camera_get_view(&camera),
-			camera_position  = camera.position,
+			frame_data       = frame_data_buffer.device_address,
 			visbuffer        = visbuffer.bindless_idx,
 			out_image        = draw_image.bindless_idx,
 			index_buffer     = scene.index_buffer.device_address,
@@ -335,7 +383,6 @@ main :: proc() {
 			tangent_buffer   = scene.tangent_buffer.device_address,
 			uv_buffer        = scene.uv_buffer.device_address,
 			material_buffer  = scene.material_buffer.device_address,
-			texture_sampler  = texture_sampler_idx,
 		}
 		vk.CmdPushConstants(
 			cb,

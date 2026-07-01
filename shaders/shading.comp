@@ -3,8 +3,7 @@
 #include "types.glsl"
 
 layout(push_constant) uniform PushConstants {
-    mat4 proj_view_matrix;
-    vec3 camera_position;
+    FrameDataBuffer frame_data;
     uint visbuffer;
     uint out_image;
     IndexBuffer index_buffer;
@@ -14,7 +13,6 @@ layout(push_constant) uniform PushConstants {
     TangentBuffer tangent_buffer;
     UvBuffer uv_buffer;
     MaterialBuffer material_buffer;
-    uint texture_sampler;
 } push;
 
 layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
@@ -32,13 +30,13 @@ vec3 moller_trumbore(vec3 p0, vec3 p1, vec3 p2, vec3 ray_origin, vec3 ray_dir) {
     return vec3(1.0 - u - v, u, v);
 }
 
-vec3 pixel_bary(ivec2 px, ivec2 size, mat4 inv_proj_view, vec3 p0w, vec3 p1w, vec3 p2w) {
+vec3 pixel_bary(ivec2 px, ivec2 size, mat4 inv_proj_view, vec3 camera_position, vec3 p0w, vec3 p1w, vec3 p2w) {
     // reconstruct the world-space ray through this pixel's center
     vec2 ndc = (vec2(px) + 0.5) / vec2(size) * 2.0 - 1.0;
     vec4 far = inv_proj_view * vec4(ndc, 1.0, 1.0);
     far /= far.w;
-    vec3 ray_dir = normalize(far.xyz - push.camera_position);
-    return moller_trumbore(p0w, p1w, p2w, push.camera_position, ray_dir);
+    vec3 ray_dir = normalize(far.xyz - camera_position);
+    return moller_trumbore(p0w, p1w, p2w, camera_position, ray_dir);
 }
 
 void main() {
@@ -70,11 +68,12 @@ void main() {
     vec3 p1w = vec3(draw.transform * vec4(p1, 1.0));
     vec3 p2w = vec3(draw.transform * vec4(p2, 1.0));
 
-    mat4 inv_proj_view = inverse(push.proj_view_matrix);
+    mat4 inv_proj_view = push.frame_data.data.inv_proj_view_matrix;
+    vec3 camera_position = push.frame_data.data.camera_position;
 
-    vec3 bary = pixel_bary(coord, size, inv_proj_view, p0w, p1w, p2w);
-    vec3 bary_ddx = pixel_bary(coord + ivec2(1, 0), size, inv_proj_view, p0w, p1w, p2w);
-    vec3 bary_ddy = pixel_bary(coord + ivec2(0, 1), size, inv_proj_view, p0w, p1w, p2w);
+    vec3 bary = pixel_bary(coord, size, inv_proj_view, camera_position, p0w, p1w, p2w);
+    vec3 bary_ddx = pixel_bary(coord + ivec2(1, 0), size, inv_proj_view, camera_position, p0w, p1w, p2w);
+    vec3 bary_ddy = pixel_bary(coord + ivec2(0, 1), size, inv_proj_view, camera_position, p0w, p1w, p2w);
 
     vec3 d_bary_dx = bary_ddx - bary;
     vec3 d_bary_dy = bary_ddy - bary;
@@ -105,7 +104,7 @@ void main() {
         tangent = normalize(tangent - dot(tangent, normal) * normal);
         vec3 bitangent = cross(normal, tangent) * t0.w;
 
-        vec3 tex_normal = textureGrad(TEX(material.normal_tex, push.texture_sampler), uv, uv_ddx, uv_ddy).rgb;
+        vec3 tex_normal = textureGrad(TEX(material.normal_tex, push.frame_data.data.texture_sampler), uv, uv_ddx, uv_ddy).rgb;
         tex_normal = tex_normal * 2.0 - 1.0;
 
         mat3 TBN = mat3(tangent, bitangent, normal);
@@ -117,12 +116,12 @@ void main() {
     vec3 color = material.base_color;
 
     if (material.base_color_tex >= 0) {
-        vec4 tex_color = textureGrad(TEX(material.base_color_tex, push.texture_sampler), uv, uv_ddx, uv_ddy);
+        vec4 tex_color = textureGrad(TEX(material.base_color_tex, push.frame_data.data.texture_sampler), uv, uv_ddx, uv_ddy);
         color.rgb *= tex_color.rgb;
     }
 
-    float diffuse = dot(normal, normalize(vec3(0.1, 1.0, -0.1)));
-    color *= (0.4 + 0.4 * diffuse);
+    float diffuse = dot(normal, push.frame_data.data.light_dir);
+    color *= push.frame_data.data.light_color * (0.4 + 0.4 * diffuse);
 
     imageStore(F32(push.out_image), coord, vec4(color, 1.0));
 }

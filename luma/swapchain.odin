@@ -147,7 +147,7 @@ create_swapchain :: proc(
 		}
 
 		desired_image_count := surface_caps.minImageCount + 1
-		image_count := max(surface_caps.maxImageCount, desired_image_count)
+		image_count := min(surface_caps.maxImageCount, desired_image_count)
 
 		swapchain.device = d
 

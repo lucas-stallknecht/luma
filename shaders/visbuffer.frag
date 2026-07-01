@@ -4,12 +4,11 @@
 
 layout(push_constant) uniform PushConstants
 {
-    mat4 proj_view_matrix;
+    FrameDataBuffer frame_data;
     VertexBuffer vertex_buffer;
     DrawDataBuffer draw_data_buffer;
     UvBuffer uv_buffer;
     MaterialBuffer material_buffer;
-    uint texture_sampler;
 } push;
 
 layout(location = 0) in flat uint triangle_base;
@@ -23,7 +22,7 @@ void main() {
     Material material = push.material_buffer.materials[material_idx];
 
     if (material.base_color_tex >= 0) {
-        float alpha = texture(TEX(material.base_color_tex, push.texture_sampler), uv).a;
+        float alpha = texture(TEX(material.base_color_tex, push.frame_data.data.texture_sampler), uv).a;
         if (alpha < 0.5) {
             discard;
         }

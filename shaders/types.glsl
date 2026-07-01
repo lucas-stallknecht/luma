@@ -17,14 +17,26 @@ struct Material {
     int metallic_roughness_tex;
 };
 
+struct FrameData {
+    mat4 proj_view_matrix;
+    mat4 inv_proj_view_matrix;
+    vec3 camera_position;
+    uint texture_sampler;
+    vec3 light_dir;
+    float _pad0;
+    vec3 light_color;
+    float _pad1;
+};
+
+layout(buffer_reference, std430) readonly buffer FrameDataBuffer {
+    FrameData data;
+};
+
 layout(buffer_reference, std430) readonly buffer IndexBuffer {
     uint indices[];
 };
 layout(buffer_reference, buffer_reference_align = 4, scalar) readonly buffer VertexBuffer {
     vec3 positions[];
-};
-layout(buffer_reference, std430) readonly buffer DrawDataBuffer {
-    DrawData draw_data[];
 };
 layout(buffer_reference, buffer_reference_align = 4, scalar) readonly buffer NormalBuffer {
     vec3 normals[];
@@ -34,6 +46,10 @@ layout(buffer_reference, std430) readonly buffer TangentBuffer {
 };
 layout(buffer_reference, buffer_reference_align = 16) readonly buffer UvBuffer {
     vec2 uvs[];
+};
+
+layout(buffer_reference, std430) readonly buffer DrawDataBuffer {
+    DrawData draw_data[];
 };
 layout(buffer_reference, std430) readonly buffer MaterialBuffer {
     Material materials[];

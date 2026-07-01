@@ -3,12 +3,11 @@
 
 layout(push_constant) uniform PushConstants
 {
-    mat4 proj_view_matrix;
+    FrameDataBuffer frame_data;
     VertexBuffer vertex_buffer;
     DrawDataBuffer draw_data_buffer;
     UvBuffer uv_buffer;
     MaterialBuffer material_buffer;
-    uint texture_sampler;
 } push;
 
 layout(location = 0) out flat uint triangle_base;
@@ -20,7 +19,7 @@ void main() {
     vec3 pos = push.vertex_buffer.positions[gl_VertexIndex];
     DrawData draw = push.draw_data_buffer.draw_data[gl_DrawID];
 
-    gl_Position = push.proj_view_matrix * draw.transform * vec4(pos, 1.0);
+    gl_Position = push.frame_data.data.proj_view_matrix * draw.transform * vec4(pos, 1.0);
     triangle_base = draw.triangle_base;
     draw_id = uint(gl_DrawID);
     uv = push.uv_buffer.uvs[gl_VertexIndex];

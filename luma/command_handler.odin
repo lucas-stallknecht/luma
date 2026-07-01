@@ -34,7 +34,7 @@ Command_Handler :: struct {
 	submission_counter:     u32,
 }
 
-MAX_COMMAND_BUFFERS: u8 : 32
+MAX_COMMAND_BUFFERS: u8 : 8
 
 command_handler_init :: proc(
 	ch: ^Command_Handler,
