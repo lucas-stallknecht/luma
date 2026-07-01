@@ -32,6 +32,15 @@ vec3 moller_trumbore(vec3 p0, vec3 p1, vec3 p2, vec3 ray_origin, vec3 ray_dir) {
     return vec3(1.0 - u - v, u, v);
 }
 
+vec3 pixel_bary(ivec2 px, ivec2 size, mat4 inv_proj_view, vec3 p0w, vec3 p1w, vec3 p2w) {
+    // reconstruct the world-space ray through this pixel's center
+    vec2 ndc = (vec2(px) + 0.5) / vec2(size) * 2.0 - 1.0;
+    vec4 far = inv_proj_view * vec4(ndc, 1.0, 1.0);
+    far /= far.w;
+    vec3 ray_dir = normalize(far.xyz - push.camera_position);
+    return moller_trumbore(p0w, p1w, p2w, push.camera_position, ray_dir);
+}
+
 void main() {
     ivec2 coord = ivec2(gl_GlobalInvocationID.xy);
     ivec2 size = imageSize(U32(push.visbuffer));
@@ -57,24 +66,31 @@ void main() {
     vec3 p1 = push.vertex_buffer.positions[i1];
     vec3 p2 = push.vertex_buffer.positions[i2];
 
-    // transform to world space (draw.transform is the model matrix, not proj*view*model)
     vec3 p0w = vec3(draw.transform * vec4(p0, 1.0));
     vec3 p1w = vec3(draw.transform * vec4(p1, 1.0));
     vec3 p2w = vec3(draw.transform * vec4(p2, 1.0));
 
-    // reconstruct the world-space ray through this pixel's center
-    vec2 ndc = (vec2(coord) + 0.5) / vec2(size) * 2.0 - 1.0;
-    vec4 far_world = inverse(push.proj_view_matrix) * vec4(ndc, 1.0, 1.0);
-    far_world /= far_world.w;
-    vec3 ray_dir = normalize(far_world.xyz - push.camera_position);
+    mat4 inv_proj_view = inverse(push.proj_view_matrix);
 
-    vec3 bary = moller_trumbore(p0w, p1w, p2w, push.camera_position, ray_dir);
+    vec3 bary = pixel_bary(coord, size, inv_proj_view, p0w, p1w, p2w);
+    vec3 bary_ddx = pixel_bary(coord + ivec2(1, 0), size, inv_proj_view, p0w, p1w, p2w);
+    vec3 bary_ddy = pixel_bary(coord + ivec2(0, 1), size, inv_proj_view, p0w, p1w, p2w);
+
+    vec3 d_bary_dx = bary_ddx - bary;
+    vec3 d_bary_dy = bary_ddy - bary;
 
     vec2 uv0 = push.uv_buffer.uvs[i0];
     vec2 uv1 = push.uv_buffer.uvs[i1];
     vec2 uv2 = push.uv_buffer.uvs[i2];
+
     vec2 uv = bary.x * uv0 + bary.y * uv1 + bary.z * uv2;
     uv.y = 1.0 - uv.y;
+
+    // derivative of (1 - uv.y) is -(d uv.y), so negate the y component
+    vec2 uv_ddx = d_bary_dx.x * uv0 + d_bary_dx.y * uv1 + d_bary_dx.z * uv2;
+    vec2 uv_ddy = d_bary_dy.x * uv0 + d_bary_dy.y * uv1 + d_bary_dy.z * uv2;
+    uv_ddx.y = -uv_ddx.y;
+    uv_ddy.y = -uv_ddy.y;
 
     vec3 n0 = push.normal_buffer.normals[i0];
     vec3 n1 = push.normal_buffer.normals[i1];
@@ -86,9 +102,10 @@ void main() {
         vec4 t1 = push.tangent_buffer.tangents[i1];
         vec4 t2 = push.tangent_buffer.tangents[i2];
         vec3 tangent = normalize(bary.x * t0.xyz + bary.y * t1.xyz + bary.z * t2.xyz);
+        tangent = normalize(tangent - dot(tangent, normal) * normal);
         vec3 bitangent = cross(normal, tangent) * t0.w;
 
-        vec3 tex_normal = texture(TEX(material.normal_tex, push.texture_sampler), uv).rgb;
+        vec3 tex_normal = textureGrad(TEX(material.normal_tex, push.texture_sampler), uv, uv_ddx, uv_ddy).rgb;
         tex_normal = tex_normal * 2.0 - 1.0;
 
         mat3 TBN = mat3(tangent, bitangent, normal);
@@ -100,12 +117,12 @@ void main() {
     vec3 color = material.base_color;
 
     if (material.base_color_tex >= 0) {
-        vec4 tex_color = texture(TEX(material.base_color_tex, push.texture_sampler), uv);
+        vec4 tex_color = textureGrad(TEX(material.base_color_tex, push.texture_sampler), uv, uv_ddx, uv_ddy);
         color.rgb *= tex_color.rgb;
     }
 
     float diffuse = dot(normal, normalize(vec3(0.1, 1.0, -0.1)));
-    color *= diffuse;
+    color *= (0.4 + 0.4 * diffuse);
 
     imageStore(F32(push.out_image), coord, vec4(color, 1.0));
 }

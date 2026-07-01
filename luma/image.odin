@@ -1,6 +1,7 @@
 package luma
 
 import "base:intrinsics"
+import "core:math"
 import vk "vendor:vulkan"
 
 Image :: struct {
@@ -9,6 +10,7 @@ Image :: struct {
 	memory:       vk.DeviceMemory,
 	format:       vk.Format,
 	layout:       vk.ImageLayout, // for image_barriers()
+	mip_levels:   u32,
 	bindless_idx: u32,
 }
 
@@ -24,6 +26,7 @@ Image_Create_Desc :: struct {
 		Storage,
 		Texture,
 	},
+	mips:              bool,
 }
 
 create_image :: proc(device: ^Device, desc: Image_Create_Desc) -> Image {
@@ -31,11 +34,14 @@ create_image :: proc(device: ^Device, desc: Image_Create_Desc) -> Image {
 	out.format = desc.format
 	out.layout = .UNDEFINED
 
+	mip_levels :=
+		1 if !desc.mips else u32(math.floor(math.log2(max(f32(desc.width), f32(desc.height))))) + 1
+
 	image_ci := vk.ImageCreateInfo {
 		sType       = .IMAGE_CREATE_INFO,
 		imageType   = .D2,
 		extent      = {desc.width, desc.height, 1},
-		mipLevels   = 1,
+		mipLevels   = mip_levels,
 		arrayLayers = 1,
 		usage       = desc.usage,
 		format      = desc.format,
@@ -68,7 +74,7 @@ create_image :: proc(device: ^Device, desc: Image_Create_Desc) -> Image {
 		subresourceRange = {
 			aspectMask = image_aspect_mask(desc.format),
 			layerCount = 1,
-			levelCount = 1,
+			levelCount = mip_levels,
 		},
 	}
 	chk(vk.CreateImageView(device.device, &view_ci, nil, &out.view))
@@ -79,6 +85,7 @@ create_image :: proc(device: ^Device, desc: Image_Create_Desc) -> Image {
 	case .Texture:
 		out.bindless_idx = bindless_register_texture(device, out.view)
 	}
+	out.mip_levels = mip_levels
 
 	return out
 }
@@ -113,6 +120,65 @@ create_and_upload_image :: proc(
 		imageExtent = {desc.width, desc.height, 1},
 	}
 	vk.CmdCopyBufferToImage(cb, staging.buffer, out.image, .GENERAL, 1, &copy_region)
+
+	// generate mips
+	if desc.mips {
+		barrier := vk.ImageMemoryBarrier2 {
+			sType = .IMAGE_MEMORY_BARRIER_2,
+			srcStageMask = {.TRANSFER},
+			srcAccessMask = {.TRANSFER_WRITE},
+			dstStageMask = {.TRANSFER},
+			dstAccessMask = {.TRANSFER_READ},
+			oldLayout = out.layout,
+			newLayout = .GENERAL,
+			image = out.image,
+			subresourceRange = {
+				aspectMask = image_aspect_mask(out.format),
+				levelCount = 1,
+				layerCount = 1,
+			},
+		}
+		dep := vk.DependencyInfo {
+			sType                   = .DEPENDENCY_INFO,
+			imageMemoryBarrierCount = 1,
+			pImageMemoryBarriers    = &barrier,
+		}
+		vk.CmdPipelineBarrier2(cb, &dep)
+
+		mip_width := i32(desc.width)
+		mip_height := i32(desc.height)
+
+		for i in 1 ..< out.mip_levels {
+			barrier.subresourceRange.baseMipLevel = i - 1
+			vk.CmdPipelineBarrier2(cb, &dep)
+
+			blit := vk.ImageBlit {
+				srcOffsets = {{0, 0, 0}, {mip_width, mip_height, 1}},
+				dstOffsets = {
+					{0, 0, 0},
+					{
+						mip_width / 2 if mip_width > 1 else 1,
+						mip_height / 2 if mip_height > 1 else 1,
+						1,
+					},
+				},
+				srcSubresource = {
+					aspectMask = image_aspect_mask(out.format),
+					mipLevel = i - 1,
+					layerCount = 1,
+				},
+				dstSubresource = {
+					aspectMask = image_aspect_mask(out.format),
+					mipLevel = i,
+					layerCount = 1,
+				},
+			}
+			vk.CmdBlitImage(cb, out.image, .GENERAL, out.image, .GENERAL, 1, &blit, .LINEAR)
+
+			if mip_width > 1 do mip_width /= 2
+			if mip_height > 1 do mip_height /= 2
+		}
+	}
 
 	return out
 }
@@ -164,8 +230,8 @@ image_barriers :: proc(cb: vk.CommandBuffer, barriers: ..Image_Barrier) {
 			image = b.image.image,
 			subresourceRange = {
 				aspectMask = image_aspect_mask(b.image.format),
-				levelCount = 1,
 				layerCount = 1,
+				levelCount = b.image.mip_levels,
 			},
 		}
 		b.image.layout = .GENERAL

@@ -205,9 +205,10 @@ scene_init :: proc(scene: ^Scene, device: ^Device, path: string) {
 				width = u32(tex_width),
 				height = u32(tex_height),
 				format = format,
-				usage = {.SAMPLED},
+				usage = {.SAMPLED, .TRANSFER_SRC},
 				memory = .GPU_ONLY,
 				register_bindless = .Texture,
+				mips = true
 			},
 		)
 	}

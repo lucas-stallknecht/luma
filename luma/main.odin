@@ -60,7 +60,11 @@ main :: proc() {
 	)
 	defer device_cleanup(&device)
 
-	swapchain := create_swapchain(&device, window.glfw_window_ptr, {})
+	swapchain := create_swapchain(
+		&device,
+		window.glfw_window_ptr,
+		{preferred_present_mode = vk.PresentModeKHR.FIFO},
+	)
 	defer swapchain_cleanup(&swapchain)
 
 	pipeline_manager := create_pipeline_manager(&device, "shaders/", "shaders/compiled/")
@@ -172,9 +176,9 @@ main :: proc() {
 		addressModeU = .REPEAT,
 		addressModeV = .REPEAT,
 		addressModeW = .REPEAT,
-		mipLodBias   = 0.0,
+		mipLodBias   = -0.5,
 		minLod       = 0.0,
-		maxLod       = 0.0,
+		maxLod       = vk.LOD_CLAMP_NONE,
 		borderColor  = .INT_OPAQUE_BLACK,
 	}
 	chk(vk.CreateSampler(device.device, &texture_sampler_ci, nil, &texture_sampler))
