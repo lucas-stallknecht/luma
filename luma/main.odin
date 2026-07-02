@@ -127,6 +127,21 @@ main :: proc() {
 		},
 	)
 
+	Rt_Push :: struct {
+		frame_data: vk.DeviceAddress,
+		draw_image: u32,
+	}
+	rt_pipeline := pipeline_manager_add_rt(
+		&pipeline_manager,
+		{
+			name = "rt_test",
+			raygen_shader = "test.rgen",
+			miss_shader = "test.rmiss",
+			closest_hit_shader = "test.rchit",
+			push_constant_size = size_of(Rt_Push),
+		},
+	)
+
 	// mu.Context alone is ~256KB, keep it off the stack
 	ui := new(Ui)
 	defer free(ui)
@@ -377,13 +392,13 @@ main :: proc() {
 		)
 		bind_raster_pipeline(cb, visbuffer_pipeline)
 		vk.CmdBindIndexBuffer(cb, scene.index_buffer.buffer, 0, .UINT32)
-		vk.CmdDrawIndexedIndirect(
-			cb,
-			scene.draw_command_buffer.buffer,
-			0,
-			scene.draw_count,
-			size_of(vk.DrawIndexedIndirectCommand),
-		)
+		// vk.CmdDrawIndexedIndirect(
+		// 	cb,
+		// 	scene.draw_command_buffer.buffer,
+		// 	0,
+		// 	scene.draw_count,
+		// 	size_of(vk.DrawIndexedIndirectCommand),
+		// )
 
 		vk.CmdEndRendering(cb)
 
@@ -419,13 +434,50 @@ main :: proc() {
 			&shading_pc,
 		)
 		bind_compute_pipeline(cb, shading_pipeline)
-		vk.CmdDispatch(cb, window.width / 8, window.height / 8, 1)
+		// vk.CmdDispatch(cb, window.width / 8, window.height / 8, 1)
+
+		// image_barriers(
+		// 	cb,
+		// 	{
+		// 		image = &draw_image,
+		// 		src_stage = {.COMPUTE_SHADER},
+		// 		src_access = {.SHADER_STORAGE_WRITE},
+		// 		dst_stage = {.FRAGMENT_SHADER},
+		// 		dst_access = {.SHADER_STORAGE_READ},
+		// 	},
+		// )
+
+		// TEST RAY TRACING
+
+		rt_pc := Rt_Push {
+			frame_data = frame_data_buffer.device_address,
+			draw_image = draw_image.bindless_idx,
+		}
+		vk.CmdPushConstants(
+			cb,
+			rt_pipeline.layout,
+			{.RAYGEN_KHR, .CLOSEST_HIT_KHR, .MISS_KHR},
+			0,
+			size_of(Rt_Push),
+			&rt_pc,
+		)
+		bind_rt_pipeline(cb, rt_pipeline)
+		vk.CmdTraceRaysKHR(
+			cb,
+			&rt_pipeline.raygen_region,
+			&rt_pipeline.miss_region,
+			&rt_pipeline.closest_hit_region,
+			&rt_pipeline.callable_region,
+			window.width,
+			window.height,
+			1,
+		)
 
 		image_barriers(
 			cb,
 			{
 				image = &draw_image,
-				src_stage = {.COMPUTE_SHADER},
+				src_stage = {.RAY_TRACING_SHADER_KHR},
 				src_access = {.SHADER_STORAGE_WRITE},
 				dst_stage = {.FRAGMENT_SHADER},
 				dst_access = {.SHADER_STORAGE_READ},

@@ -1,5 +1,6 @@
 package luma
 
+import "base:intrinsics"
 import "core:fmt"
 import "core:mem"
 import "core:os"
@@ -17,6 +18,7 @@ Pipeline_Manager :: struct {
 	compile_shader_directory: string,
 	raster_pipelines:         map[string]Raster_Pipeline,
 	compute_pipelines:        map[string]Compute_Pipeline,
+	rt_pipelines:             map[string]Ray_Tracing_Pipeline,
 }
 
 MAX_COLOR_ATTACHMENTS :: 4
@@ -30,6 +32,7 @@ create_pipeline_manager :: proc(
 		device = d,
 		raster_pipelines = make(map[string]Raster_Pipeline),
 		compute_pipelines = make(map[string]Compute_Pipeline),
+		rt_pipelines = make(map[string]Ray_Tracing_Pipeline),
 		shader_directory = shader_directory,
 		compile_shader_directory = compile_shader_directory,
 	}
@@ -46,6 +49,11 @@ pipeline_manager_cleanup :: proc(m: ^Pipeline_Manager) {
 		compute_info_free(&pipeline.info)
 	}
 	delete(m.compute_pipelines)
+	for _, &pipeline in m.rt_pipelines {
+		destroy_rt_pipeline(m.device, &pipeline)
+		rt_info_free(&pipeline.info)
+	}
+	delete(m.rt_pipelines)
 }
 
 // compiles everything first, only swaps pipelines if it all succeeded -
@@ -59,6 +67,12 @@ pipeline_reload_all :: proc(m: ^Pipeline_Manager) -> bool {
 	compute_entries := make([dynamic]struct {
 			name: string,
 			code: []u32,
+		}, context.temp_allocator)
+	rt_entries := make([dynamic]struct {
+			name:        string,
+			raygen:      []u32,
+			miss:        []u32,
+			closest_hit: []u32,
 		}, context.temp_allocator)
 
 	all_ok := true
@@ -87,6 +101,21 @@ pipeline_reload_all :: proc(m: ^Pipeline_Manager) -> bool {
 			code: []u32,
 		}{name = name, code = c})
 	}
+	for name, &pipeline in m.rt_pipelines {
+		r, r_ok := compile_and_load_spirv(m, pipeline.info.raygen_shader)
+		mi, mi_ok := compile_and_load_spirv(m, pipeline.info.miss_shader)
+		c, c_ok := compile_and_load_spirv(m, pipeline.info.closest_hit_shader)
+		if !(r_ok && mi_ok && c_ok) {
+			all_ok = false
+			continue
+		}
+		append(&rt_entries, struct {
+			name:        string,
+			raygen:      []u32,
+			miss:        []u32,
+			closest_hit: []u32,
+		}{name = name, raygen = r, miss = mi, closest_hit = c})
+	}
 
 	if !all_ok do return false
 
@@ -100,6 +129,12 @@ pipeline_reload_all :: proc(m: ^Pipeline_Manager) -> bool {
 		p := &m.compute_pipelines[entry.name]
 		p.cached_spirv = entry.code
 	}
+	for entry in rt_entries {
+		p := &m.rt_pipelines[entry.name]
+		p.cached_spirv.raygen = entry.raygen
+		p.cached_spirv.miss = entry.miss
+		p.cached_spirv.closest_hit = entry.closest_hit
+	}
 
 	for _, &pipeline in m.raster_pipelines {
 		destroy_raster_pipeline(m.device.device, &pipeline)
@@ -108,6 +143,10 @@ pipeline_reload_all :: proc(m: ^Pipeline_Manager) -> bool {
 	for _, &pipeline in m.compute_pipelines {
 		destroy_compute_pipeline(m.device.device, &pipeline)
 		create_compute_pipeline(m, &pipeline)
+	}
+	for _, &pipeline in m.rt_pipelines {
+		destroy_rt_pipeline(m.device, &pipeline)
+		create_rt_pipeline(m, &pipeline)
 	}
 
 	return true
@@ -530,6 +569,311 @@ compute_info_free :: proc(info: ^Compute_Pipeline_Info) {
 compute_info_clone :: proc(src: Compute_Pipeline_Info) -> (dst: Compute_Pipeline_Info) {
 	dst = src
 	dst.shader = strings.clone(src.shader)
+	dst.name = strings.clone(src.name)
+	return
+}
+
+// ────────────────────────────────────────────────────────────────
+// Ray-Tracing
+
+Ray_Tracing_Pipeline :: struct {
+	pipeline:           vk.Pipeline,
+	layout:             vk.PipelineLayout,
+	sbt_buffer:         Buffer,
+	raygen_region:      vk.StridedDeviceAddressRegionKHR,
+	miss_region:        vk.StridedDeviceAddressRegionKHR,
+	closest_hit_region: vk.StridedDeviceAddressRegionKHR,
+	callable_region:    vk.StridedDeviceAddressRegionKHR,
+	info:               Ray_Tracing_Pipeline_Info,
+	cached_spirv:       struct {
+		raygen:      []u32,
+		miss:        []u32,
+		closest_hit: []u32,
+	},
+	bindless_set:       vk.DescriptorSet,
+	rt_set:             vk.DescriptorSet,
+}
+
+Stage_Indices :: enum {
+	Raygen,
+	Miss,
+	Closest_Hit,
+}
+
+Ray_Tracing_Pipeline_Info :: struct {
+	raygen_shader:      string,
+	miss_shader:        string,
+	closest_hit_shader: string,
+	push_constant_size: u32,
+	name:               string,
+}
+
+pipeline_manager_add_rt :: proc(
+	m: ^Pipeline_Manager,
+	info: Ray_Tracing_Pipeline_Info,
+) -> ^Ray_Tracing_Pipeline {
+	assert(info.name != "", "pipeline must have a non-empty name")
+	assert(info.name not_in m.rt_pipelines, "pipeline already registered. Use pipeline_reload_all")
+	info2 := rt_info_clone(info)
+	pipeline := map_insert(
+		&m.rt_pipelines,
+		info2.name,
+		Ray_Tracing_Pipeline {
+			info = info2,
+			bindless_set = m.device.descriptor_set,
+			rt_set = m.device.rt_descriptor_set,
+		},
+	)
+	create_rt_pipeline(m, pipeline)
+
+	return pipeline
+}
+
+pipeline_manager_get_rt :: proc(m: ^Pipeline_Manager, name: string) -> ^Ray_Tracing_Pipeline {
+	return &m.rt_pipelines[name]
+}
+
+pipeline_manager_remove_rt :: proc(m: ^Pipeline_Manager, name: string) {
+	pipeline, found := &m.rt_pipelines[name]
+	if !found do return
+	destroy_rt_pipeline(m.device, pipeline)
+	rt_info_free(&pipeline.info)
+	delete_key(&m.rt_pipelines, name)
+}
+
+bind_rt_pipeline :: proc(cb: vk.CommandBuffer, pipeline: ^Ray_Tracing_Pipeline) {
+	vk.CmdBindPipeline(cb, .RAY_TRACING_KHR, pipeline.pipeline)
+	sets := [2]vk.DescriptorSet{pipeline.bindless_set, pipeline.rt_set}
+	vk.CmdBindDescriptorSets(
+		cb,
+		.RAY_TRACING_KHR,
+		pipeline.layout,
+		0,
+		len(sets),
+		raw_data(&sets),
+		0,
+		nil,
+	)
+}
+
+@(private = "file")
+create_rt_pipeline :: proc(m: ^Pipeline_Manager, pipeline: ^Ray_Tracing_Pipeline) {
+	info := &pipeline.info
+
+	if len(pipeline.cached_spirv.raygen) == 0 {
+		raygen_spv, raygen_ok := compile_and_load_spirv(m, info.raygen_shader)
+		if raygen_ok {
+			pipeline.cached_spirv.raygen = raygen_spv
+		}
+	}
+	if len(pipeline.cached_spirv.miss) == 0 {
+		miss_spv, miss_ok := compile_and_load_spirv(m, info.miss_shader)
+		if miss_ok {
+			pipeline.cached_spirv.miss = miss_spv
+		}
+	}
+	if len(pipeline.cached_spirv.closest_hit) == 0 {
+		closest_hit_spv, closest_hit_ok := compile_and_load_spirv(m, info.closest_hit_shader)
+		if closest_hit_ok {
+			pipeline.cached_spirv.closest_hit = closest_hit_spv
+		}
+	}
+
+	pc_range := vk.PushConstantRange {
+		stageFlags = {.RAYGEN_KHR, .CLOSEST_HIT_KHR, .MISS_KHR},
+		size       = pipeline.info.push_constant_size,
+	}
+	set_layouts := [?]vk.DescriptorSetLayout {
+		m.device.descriptor_layout,
+		m.device.rt_descriptor_layout,
+	}
+	pipeline_layout_ci := vk.PipelineLayoutCreateInfo {
+		sType                  = .PIPELINE_LAYOUT_CREATE_INFO,
+		pushConstantRangeCount = 1,
+		pPushConstantRanges    = &pc_range,
+		setLayoutCount         = len(set_layouts),
+		pSetLayouts            = raw_data(&set_layouts),
+	}
+	chk(vk.CreatePipelineLayout(m.device.device, &pipeline_layout_ci, nil, &pipeline.layout))
+
+	modules: [Stage_Indices]vk.ShaderModule
+	defer {
+		for mod in modules {
+			if mod != 0 {
+				vk.DestroyShaderModule(m.device.device, mod, nil)
+			}
+		}
+	}
+	stages: [Stage_Indices]vk.PipelineShaderStageCreateInfo
+	push_stage(
+		m.device.device,
+		Shader_Info{byte_code = pipeline.cached_spirv.raygen},
+		.RAYGEN_KHR,
+		&modules[.Raygen],
+		&stages[.Raygen],
+	)
+	push_stage(
+		m.device.device,
+		Shader_Info{byte_code = pipeline.cached_spirv.miss},
+		.MISS_KHR,
+		&modules[.Miss],
+		&stages[.Miss],
+	)
+	push_stage(
+		m.device.device,
+		Shader_Info{byte_code = pipeline.cached_spirv.closest_hit},
+		.CLOSEST_HIT_KHR,
+		&modules[.Closest_Hit],
+		&stages[.Closest_Hit],
+	)
+
+	group := vk.RayTracingShaderGroupCreateInfoKHR {
+		sType              = .RAY_TRACING_SHADER_GROUP_CREATE_INFO_KHR,
+		anyHitShader       = vk.SHADER_UNUSED_KHR,
+		closestHitShader   = vk.SHADER_UNUSED_KHR,
+		generalShader      = vk.SHADER_UNUSED_KHR,
+		intersectionShader = vk.SHADER_UNUSED_KHR,
+	}
+	// what actually gets adressed by the shader binding table (SBT)
+	shader_groups: [3]vk.RayTracingShaderGroupCreateInfoKHR
+	// raygen
+	group.type = .GENERAL
+	group.generalShader = u32(Stage_Indices.Raygen)
+	shader_groups[Stage_Indices.Raygen] = group
+	// miss
+	group.type = .GENERAL
+	group.generalShader = u32(Stage_Indices.Miss)
+	shader_groups[Stage_Indices.Miss] = group
+	// closest hit
+	group.type = .TRIANGLES_HIT_GROUP
+	group.generalShader = vk.SHADER_UNUSED_KHR
+	group.closestHitShader = u32(Stage_Indices.Closest_Hit)
+	shader_groups[Stage_Indices.Closest_Hit] = group
+
+	pipeline_ci := vk.RayTracingPipelineCreateInfoKHR {
+		sType                        = .RAY_TRACING_PIPELINE_CREATE_INFO_KHR,
+		stageCount                   = len(stages),
+		pStages                      = raw_data(&stages),
+		groupCount                   = len(shader_groups),
+		pGroups                      = raw_data(&shader_groups),
+		maxPipelineRayRecursionDepth = max(3, m.device.rt_properties.maxRayRecursionDepth),
+		layout                       = pipeline.layout,
+	}
+	chk(
+		vk.CreateRayTracingPipelinesKHR(
+			m.device.device,
+			0,
+			0,
+			1,
+			&pipeline_ci,
+			nil,
+			&pipeline.pipeline,
+		),
+	)
+
+	create_shader_binding_table(m.device, pipeline)
+}
+
+@(private = "file")
+destroy_rt_pipeline :: proc(device: ^Device, pipeline: ^Ray_Tracing_Pipeline) {
+	if pipeline.pipeline != 0 {
+		vk.DestroyPipeline(device.device, pipeline.pipeline, nil)
+	}
+	if pipeline.layout != 0 {
+		vk.DestroyPipelineLayout(device.device, pipeline.layout, nil)
+	}
+	destroy_buffer(device, &pipeline.sbt_buffer)
+}
+
+@(private = "file")
+create_shader_binding_table :: proc(device: ^Device, pipeline: ^Ray_Tracing_Pipeline) {
+	handle_size := device.rt_properties.shaderGroupHandleSize
+	handle_alignment := device.rt_properties.shaderGroupHandleAlignment
+	base_alignment := device.rt_properties.shaderGroupBaseAlignment
+	group_count: u32 = 3
+
+	// raw shader group handles straight from the driver, tightly packed - only needed
+	// transiently to copy into the properly aligned SBT buffer below
+	handles_size := handle_size * group_count
+	handles := make([]byte, handles_size, context.temp_allocator)
+	chk(
+		vk.GetRayTracingShaderGroupHandlesKHR(
+			device.device,
+			pipeline.pipeline,
+			0,
+			group_count,
+			int(handles_size),
+			raw_data(handles),
+		),
+	)
+
+	// SBT buffer size with proper alignment
+	raygen_size := align_up(handle_size, handle_alignment)
+	miss_size := align_up(handle_size, handle_alignment)
+	closest_hit_size := align_up(handle_size, handle_alignment)
+	callable_size: u32 = 0
+	raygen_offset: u32 = 0
+	miss_offset := align_up(raygen_size, base_alignment)
+	closest_hit_offset := align_up(miss_offset + miss_size, base_alignment)
+	callable_offset := align_up(closest_hit_offset + closest_hit_size, base_alignment)
+
+	buffer_size := vk.DeviceSize(callable_offset + callable_size)
+
+	pipeline.sbt_buffer = create_buffer(
+		device,
+		{
+			size = buffer_size,
+			usage = {.SHADER_BINDING_TABLE_KHR, .SHADER_DEVICE_ADDRESS},
+			memory = .CPU_UPLOAD,
+		},
+	)
+
+	mapped_raw: rawptr
+	vk.MapMemory(device.device, pipeline.sbt_buffer.memory, 0, buffer_size, {}, &mapped_raw)
+	mapped := ([^]byte)(mapped_raw)
+
+	intrinsics.mem_copy(&mapped[raygen_offset], &handles[0 * handle_size], int(handle_size))
+	pipeline.raygen_region = {
+		deviceAddress = pipeline.sbt_buffer.device_address + vk.DeviceAddress(raygen_offset),
+		size          = vk.DeviceSize(raygen_size),
+		stride        = vk.DeviceSize(raygen_size),
+	}
+
+	intrinsics.mem_copy(&mapped[miss_offset], &handles[1 * handle_size], int(handle_size))
+	pipeline.miss_region = {
+		deviceAddress = pipeline.sbt_buffer.device_address + vk.DeviceAddress(miss_offset),
+		size          = vk.DeviceSize(miss_size),
+		stride        = vk.DeviceSize(miss_size),
+	}
+
+	intrinsics.mem_copy(&mapped[closest_hit_offset], &handles[2 * handle_size], int(handle_size))
+	pipeline.closest_hit_region = {
+		deviceAddress = pipeline.sbt_buffer.device_address + vk.DeviceAddress(closest_hit_offset),
+		size          = vk.DeviceSize(closest_hit_size),
+		stride        = vk.DeviceSize(closest_hit_size),
+	}
+
+	pipeline.callable_region = {
+		deviceAddress = 0,
+	}
+
+	vk.UnmapMemory(device.device, pipeline.sbt_buffer.memory)
+}
+
+@(private = "file")
+rt_info_free :: proc(info: ^Ray_Tracing_Pipeline_Info) {
+	delete(info.raygen_shader)
+	delete(info.miss_shader)
+	delete(info.closest_hit_shader)
+	delete(info.name)
+}
+
+@(private = "file")
+rt_info_clone :: proc(src: Ray_Tracing_Pipeline_Info) -> (dst: Ray_Tracing_Pipeline_Info) {
+	dst = src
+	dst.raygen_shader = strings.clone(src.raygen_shader)
+	dst.miss_shader = strings.clone(src.miss_shader)
+	dst.closest_hit_shader = strings.clone(src.closest_hit_shader)
 	dst.name = strings.clone(src.name)
 	return
 }

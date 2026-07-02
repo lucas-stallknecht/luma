@@ -1,0 +1,27 @@
+#version 460 core
+#include "luma.glsl"
+#include "types.glsl"
+#include "rt.glsl"
+
+layout(push_constant) uniform PushConstants {
+    FrameDataBuffer frame_data;
+    uint out_image;
+} push;
+
+void main() {
+    vec2 tex_coord = (vec2(gl_LaunchIDEXT.xy) + 0.5) / vec2(gl_LaunchSizeEXT.xy);
+    vec2 ndc_coords = tex_coord * 2.0 - 1.0;
+    vec4 world_coords = push.frame_data.data.inv_proj_view_matrix * vec4(ndc_coords, 1.0, 1.0);
+    world_coords.xyz /= world_coords.w;
+
+    vec3 ray_origin = push.frame_data.data.camera_position;
+    vec3 ray_direction = normalize(world_coords.xyz - ray_origin);
+
+    uint ray_flags = gl_RayFlagsNoneEXT;
+    float ray_min = 0.001;
+    float ray_max = 1000.0;
+    uint cull_mask = 0xFFu;
+
+    traceRayEXT(tlas, ray_flags, cull_mask, 0u, 0u, 0u, ray_origin, ray_min, ray_direction, ray_max, 0);
+    imageStore(F32(push.out_image), ivec2(gl_LaunchIDEXT), vec4(payload, 1.0));
+}
