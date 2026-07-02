@@ -1,6 +1,11 @@
 #version 460 core
+
+#extension GL_EXT_ray_query : require
+
 #include "luma.glsl"
 #include "types.glsl"
+
+layout(binding = 0, set = 1) uniform accelerationStructureEXT tlas;
 
 layout(push_constant) uniform PushConstants {
     FrameDataBuffer frame_data;
@@ -123,15 +128,26 @@ void main() {
     // world normal
     normal = normalize(mat3(draw.transform) * normal);
 
-    vec3 color = material.base_color;
+    vec3 albedo = material.base_color;
 
     if (material.base_color_tex >= 0) {
         vec4 tex_color = textureGrad(TEX(material.base_color_tex, push.frame_data.data.texture_sampler), uv, uv_ddx, uv_ddy);
-        color.rgb *= tex_color.rgb;
+        albedo.rgb *= tex_color.rgb;
     }
 
+    vec3 ray_origin = vec3(bary.x * p0w + bary.y * p1w + bary.z * p2w);
+    rayQueryEXT ray_query;
+    rayQueryInitializeEXT(
+        ray_query, tlas, gl_RayFlagsTerminateOnFirstHitEXT | gl_RayFlagsOpaqueEXT | gl_RayFlagsSkipClosestHitShaderEXT,
+        0xFFu, ray_origin, 0.001, push.frame_data.data.light_dir, 1000.0
+    );
+    rayQueryProceedEXT(ray_query);
+    bool occluder_hit = rayQueryGetIntersectionTypeEXT(ray_query, true) != gl_RayQueryCommittedIntersectionNoneEXT;
+
+    vec3 ambient = push.frame_data.data.ambient_color * push.frame_data.data.ambient_intensity;
     float diffuse = dot(normal, push.frame_data.data.light_dir);
-    color *= push.frame_data.data.light_color * (0.4 + 0.4 * diffuse);
+    float shadow = float(!occluder_hit);
+    vec3 color = (ambient + push.frame_data.data.light_color * push.frame_data.data.light_intensity * shadow * diffuse) * albedo;
 
     imageStore(F32(push.out_image), coord, vec4(color, 1.0));
 }

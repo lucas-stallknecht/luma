@@ -109,7 +109,12 @@ main :: proc() {
 	}
 	shading_pipeline := pipeline_manager_add_compute(
 		&pipeline_manager,
-		{name = "shading", shader = "shading.comp", push_constant_size = size_of(Shading_Push)},
+		{
+			name = "shading",
+			shader = "shading.comp",
+			push_constant_size = size_of(Shading_Push),
+			uses_rt = true,
+		},
 	)
 
 	Present_Push :: struct {
@@ -195,12 +200,16 @@ main :: proc() {
 		camera_position:      glsl.vec3,
 		texture_sampler:      u32,
 		light_dir:            glsl.vec3,
-		_pad0:                f32,
+		ambient_intensity:    f32,
 		light_color:          glsl.vec3,
-		_pad1:                f32,
+		light_intensity:      f32,
+		ambient_color:        glsl.vec3,
 	}
 	light_dir := glsl.vec3{0.1, 1.0, -0.1}
 	light_color := glsl.vec3{1.0, 1.0, 1.0}
+	light_intensity := f32(1.0)
+	ambient_color := glsl.vec3{1.0, 1.0, 1.0}
+	ambient_intensity := f32(0.1)
 
 	// one buffer per in-flight command buffer slot, so the CPU never overwrites frame
 	// data the GPU hasn't finished reading yet
@@ -266,10 +275,13 @@ main :: proc() {
 
 		// ui
 		mu.begin(&ui.ctx)
-		if mu.window(&ui.ctx, "Debug", {x = 20, y = 20, w = 260, h = 280}) {
+		if mu.window(&ui.ctx, "Debug", {x = 20, y = 20, w = 260, h = 400}) {
 			fps := 1.0 / dt if dt > 0 else 0
 			mu.layout_row(&ui.ctx, {-1}, 0)
 			mu.label(&ui.ctx, fmt.tprintf("%.2f ms (%.0f fps)", dt * 1000, fps))
+
+			SWATCH_WIDTH :: 50
+			SWATCH_GAP :: 8
 
 			mu.label(&ui.ctx, "Light direction")
 			mu.layout_row(&ui.ctx, {-1}, 0)
@@ -277,10 +289,39 @@ main :: proc() {
 			mu.slider(&ui.ctx, &light_dir.y, -1, 1)
 			mu.slider(&ui.ctx, &light_dir.z, -1, 1)
 
+			mu.layout_row(&ui.ctx, {-1}, 0)
 			mu.label(&ui.ctx, "Light color")
+			mu.layout_row(&ui.ctx, {-(SWATCH_WIDTH + SWATCH_GAP)}, 0)
+			light_color_top := ui_layout_cursor_y(&ui.ctx)
 			mu.slider(&ui.ctx, &light_color.x, 0, 1)
 			mu.slider(&ui.ctx, &light_color.y, 0, 1)
 			mu.slider(&ui.ctx, &light_color.z, 0, 1)
+			ui_color_rect(
+				&ui.ctx,
+				ui_swatch_rect(&ui.ctx, light_color_top, SWATCH_WIDTH),
+				light_color,
+			)
+
+			mu.layout_row(&ui.ctx, {-1}, 0)
+			mu.label(&ui.ctx, "Light intensity")
+			mu.slider(&ui.ctx, &light_intensity, 0, 4)
+
+			mu.layout_row(&ui.ctx, {-1}, 0)
+			mu.label(&ui.ctx, "Ambient color")
+			mu.layout_row(&ui.ctx, {-(SWATCH_WIDTH + SWATCH_GAP)}, 0)
+			ambient_color_top := ui_layout_cursor_y(&ui.ctx)
+			mu.slider(&ui.ctx, &ambient_color.x, 0, 1)
+			mu.slider(&ui.ctx, &ambient_color.y, 0, 1)
+			mu.slider(&ui.ctx, &ambient_color.z, 0, 1)
+			ui_color_rect(
+				&ui.ctx,
+				ui_swatch_rect(&ui.ctx, ambient_color_top, SWATCH_WIDTH),
+				ambient_color,
+			)
+
+			mu.layout_row(&ui.ctx, {-1}, 0)
+			mu.label(&ui.ctx, "Ambient intensity")
+			mu.slider(&ui.ctx, &ambient_intensity, 0, 1)
 		}
 		mu.end(&ui.ctx)
 
@@ -296,6 +337,9 @@ main :: proc() {
 			texture_sampler      = texture_sampler_idx,
 			light_dir            = glsl.normalize(light_dir),
 			light_color          = light_color,
+			light_intensity      = light_intensity,
+			ambient_color        = ambient_color,
+			ambient_intensity    = ambient_intensity,
 		}
 		frame_data_buffer := &frame_data_buffers[handle.buffer_idx]
 		mem.copy(frame_data_mapped[handle.buffer_idx], &frame_data, size_of(Frame_Data))

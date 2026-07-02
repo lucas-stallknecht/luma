@@ -184,8 +184,8 @@ device_init :: proc(d: ^Device, desc: Device_Desc) {
 			vk.KHR_SWAPCHAIN_EXTENSION_NAME,
 			vk.EXT_EXTENDED_DYNAMIC_STATE_3_EXTENSION_NAME,
 			vk.KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME,
-			vk.KHR_RAY_TRACING_PIPELINE_EXTENSION_NAME,
 			vk.KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME,
+			vk.KHR_RAY_QUERY_EXTENSION_NAME,
 		}
 		vk11_features := vk.PhysicalDeviceVulkan11Features {
 			sType                = .PHYSICAL_DEVICE_VULKAN_1_1_FEATURES,
@@ -223,10 +223,14 @@ device_init :: proc(d: ^Device, desc: Device_Desc) {
 			pNext                 = &vk13_features,
 			accelerationStructure = true,
 		}
+		ray_query_features := vk.PhysicalDeviceRayQueryFeaturesKHR {
+			sType    = .PHYSICAL_DEVICE_RAY_QUERY_FEATURES_KHR,
+			pNext    = &accel_features,
+			rayQuery = true,
+		}
 		rt_pipeline_features := vk.PhysicalDeviceRayTracingPipelineFeaturesKHR {
-			sType              = .PHYSICAL_DEVICE_RAY_TRACING_PIPELINE_FEATURES_KHR,
-			pNext              = &accel_features,
-			rayTracingPipeline = true,
+			sType = .PHYSICAL_DEVICE_RAY_TRACING_PIPELINE_FEATURES_KHR,
+			pNext = &ray_query_features,
 		}
 
 		device_ci := vk.DeviceCreateInfo {
@@ -276,7 +280,7 @@ device_init :: proc(d: ^Device, desc: Device_Desc) {
 			binding = 0,
 			descriptorType = .ACCELERATION_STRUCTURE_KHR,
 			descriptorCount = 1,
-			stageFlags = {.RAYGEN_KHR, .CLOSEST_HIT_KHR, .ANY_HIT_KHR, .MISS_KHR},
+			stageFlags = {.COMPUTE},
 		},
 	}
 	rt_desc_layout_ci := vk.DescriptorSetLayoutCreateInfo {

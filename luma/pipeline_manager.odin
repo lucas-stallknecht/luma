@@ -415,16 +415,18 @@ raster_info_free :: proc(info: ^Raster_Pipeline_Info) {
 // Compute
 
 Compute_Pipeline :: struct {
-	pipeline:     vk.Pipeline,
-	layout:       vk.PipelineLayout,
-	info:         Compute_Pipeline_Info,
-	cached_spirv: []u32,
-	bindless_set: vk.DescriptorSet,
+	pipeline:          vk.Pipeline,
+	layout:            vk.PipelineLayout,
+	info:              Compute_Pipeline_Info,
+	cached_spirv:      []u32,
+	bindless_set:      vk.DescriptorSet,
+	rt_descriptor_set: vk.DescriptorSet,
 }
 
 Compute_Pipeline_Info :: struct {
 	shader:             string,
 	push_constant_size: u32,
+	uses_rt:            bool, // pulls in the rt descriptor set (set = 1, TLAS) alongside the bindless set
 	name:               string, // Debug label (used by the manager as the pipeline key)
 }
 
@@ -441,7 +443,11 @@ pipeline_manager_add_compute :: proc(
 	pipeline := map_insert(
 		&m.compute_pipelines,
 		info2.name,
-		Compute_Pipeline{info = info2, bindless_set = m.device.descriptor_set},
+		Compute_Pipeline {
+			info = info2,
+			bindless_set = m.device.descriptor_set,
+			rt_descriptor_set = m.device.rt_descriptor_set if info2.uses_rt else 0,
+		},
 	)
 	create_compute_pipeline(m, pipeline)
 
@@ -462,7 +468,30 @@ pipeline_manager_remove_compute :: proc(m: ^Pipeline_Manager, name: string) {
 
 bind_compute_pipeline :: proc(cb: vk.CommandBuffer, pipeline: ^Compute_Pipeline) {
 	vk.CmdBindPipeline(cb, .COMPUTE, pipeline.pipeline)
-	vk.CmdBindDescriptorSets(cb, .COMPUTE, pipeline.layout, 0, 1, &pipeline.bindless_set, 0, nil)
+	if pipeline.rt_descriptor_set != 0 {
+		sets := [?]vk.DescriptorSet{pipeline.bindless_set, pipeline.rt_descriptor_set}
+		vk.CmdBindDescriptorSets(
+			cb,
+			.COMPUTE,
+			pipeline.layout,
+			0,
+			len(sets),
+			raw_data(&sets),
+			0,
+			nil,
+		)
+	} else {
+		vk.CmdBindDescriptorSets(
+			cb,
+			.COMPUTE,
+			pipeline.layout,
+			0,
+			1,
+			&pipeline.bindless_set,
+			0,
+			nil,
+		)
+	}
 }
 
 @(private = "file")
@@ -493,10 +522,14 @@ create_compute_pipeline :: proc(m: ^Pipeline_Manager, pipeline: ^Compute_Pipelin
 		stageFlags = {.COMPUTE},
 		size       = info.push_constant_size,
 	}
+	set_layouts := [?]vk.DescriptorSetLayout {
+		m.device.descriptor_layout,
+		m.device.rt_descriptor_layout,
+	}
 	layout_ci := vk.PipelineLayoutCreateInfo {
 		sType                  = .PIPELINE_LAYOUT_CREATE_INFO,
-		setLayoutCount         = 1,
-		pSetLayouts            = &m.device.descriptor_layout,
+		setLayoutCount         = 2 if info.uses_rt else 1,
+		pSetLayouts            = raw_data(&set_layouts),
 		pushConstantRangeCount = 1 if info.push_constant_size > 0 else 0,
 		pPushConstantRanges    = &pc_range if info.push_constant_size > 0 else nil,
 	}

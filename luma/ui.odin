@@ -140,6 +140,32 @@ ui_color_to_vec4 :: proc(color: mu.Color) -> glsl.vec4 {
 	return {f32(color.r) / 255, f32(color.g) / 255, f32(color.b) / 255, f32(color.a) / 255}
 }
 
+ui_color_rect :: proc(ctx: ^mu.Context, rect: mu.Rect, rgb: glsl.vec3) {
+	mu.draw_rect(
+		ctx,
+		rect,
+		{
+			u8(clamp(rgb.r, 0, 1) * 255),
+			u8(clamp(rgb.g, 0, 1) * 255),
+			u8(clamp(rgb.b, 0, 1) * 255),
+			255,
+		},
+	)
+}
+
+ui_layout_cursor_y :: proc(ctx: ^mu.Context) -> i32 {
+	layout := mu.get_layout(ctx)
+	return layout.body.y + layout.position.y
+}
+
+// spans from `top` down to the last widget placed since, right-aligned in the container
+ui_swatch_rect :: proc(ctx: ^mu.Context, top: i32, width: i32) -> mu.Rect {
+	layout := mu.get_layout(ctx)
+	row_height := ctx.style.size.y + ctx.style.padding * 2 + ctx.style.spacing
+	bottom := layout.body.y + layout.position.y - ctx.style.spacing + row_height
+	return {layout.body.x + layout.body.w - width, top, width, bottom - top}
+}
+
 @(private = "file")
 ui_push_quad :: proc(
 	verts: ^[UI_MAX_VERTICES]Ui_Vertex,

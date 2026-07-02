@@ -23,9 +23,10 @@ struct FrameData {
     vec3 camera_position;
     uint texture_sampler;
     vec3 light_dir;
-    float _pad0;
+    float ambient_intensity;
     vec3 light_color;
-    float _pad1;
+    float light_intensity;
+    vec3 ambient_color;
 };
 
 layout(buffer_reference, std430) readonly buffer FrameDataBuffer {
