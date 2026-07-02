@@ -581,7 +581,7 @@ compile_and_load_spirv :: proc(m: ^Pipeline_Manager, path: string) -> ([]u32, bo
 	}
 
 	state, stdout, stderr, proc_err := os.process_exec(
-		{command = {"glslc", src_path, "-o", dst_path}},
+		{command = {"glslc", "--target-env=vulkan1.3", src_path, "-o", dst_path}},
 		context.temp_allocator,
 	)
 	if proc_err != nil {

@@ -9,6 +9,11 @@ Buffer :: struct {
 	device_address: vk.DeviceAddress,
 }
 
+// rounds value up to the next multiple of alignment (alignment must be a power of two)
+align_up :: proc(value: $T, alignment: T) -> T {
+	return (value + alignment - 1) & ~(alignment - 1)
+}
+
 Buffer_Create_Desc :: struct {
 	size:   vk.DeviceSize,
 	usage:  vk.BufferUsageFlags,
@@ -99,4 +104,36 @@ create_and_upload_buffer :: proc(
 	vk.CmdCopyBuffer(cb, staging.buffer, out.buffer, 1, &copy_info)
 
 	return out
+}
+
+Buffer_Barrier :: struct {
+	buffer:     ^Buffer,
+	src_stage:  vk.PipelineStageFlags2,
+	src_access: vk.AccessFlags2,
+	dst_stage:  vk.PipelineStageFlags2,
+	dst_access: vk.AccessFlags2,
+}
+
+buffer_barriers :: proc(cb: vk.CommandBuffer, barriers: ..Buffer_Barrier) {
+	vk_barriers := make([]vk.BufferMemoryBarrier2, len(barriers), context.temp_allocator)
+	for b, i in barriers {
+		vk_barriers[i] = vk.BufferMemoryBarrier2 {
+			sType               = .BUFFER_MEMORY_BARRIER_2,
+			srcStageMask        = b.src_stage,
+			srcAccessMask       = b.src_access,
+			dstStageMask        = b.dst_stage,
+			dstAccessMask       = b.dst_access,
+			srcQueueFamilyIndex = vk.QUEUE_FAMILY_IGNORED,
+			dstQueueFamilyIndex = vk.QUEUE_FAMILY_IGNORED,
+			buffer              = b.buffer.buffer,
+			offset              = 0,
+			size                = vk.DeviceSize(vk.WHOLE_SIZE),
+		}
+	}
+	dep := vk.DependencyInfo {
+		sType                    = .DEPENDENCY_INFO,
+		bufferMemoryBarrierCount = u32(len(vk_barriers)),
+		pBufferMemoryBarriers    = raw_data(vk_barriers),
+	}
+	vk.CmdPipelineBarrier2(cb, &dep)
 }

@@ -16,6 +16,8 @@ chk :: proc(result: vk.Result, location := #caller_location) {
 Device :: struct {
 	instance:                vk.Instance,
 	physical_device:         vk.PhysicalDevice,
+	rt_properties:           vk.PhysicalDeviceRayTracingPipelinePropertiesKHR,
+	accel_properties:        vk.PhysicalDeviceAccelerationStructurePropertiesKHR,
 	queues:                  struct {
 		graphics:            vk.Queue,
 		graphics_family_idx: u32,
@@ -27,6 +29,8 @@ Device :: struct {
 	descriptor_pool:         vk.DescriptorPool,
 	descriptor_layout:       vk.DescriptorSetLayout,
 	descriptor_set:          vk.DescriptorSet,
+	rt_descriptor_layout:    vk.DescriptorSetLayout,
+	rt_descriptor_set:       vk.DescriptorSet,
 	command_handler:         Command_Handler,
 	bindless_next:           struct {
 		sampler:       u32,
@@ -67,8 +71,15 @@ device_init :: proc(d: ^Device, desc: Device_Desc) {
 			pApplicationInfo = &{sType = .APPLICATION_INFO, apiVersion = vk.API_VERSION_1_3},
 		}
 		if desc.enable_validation {
+			debug_printf_feature := vk.ValidationFeatureEnableEXT.DEBUG_PRINTF
+			validation_features := vk.ValidationFeaturesEXT {
+				sType                         = .VALIDATION_FEATURES_EXT,
+				enabledValidationFeatureCount = 1,
+				pEnabledValidationFeatures    = &debug_printf_feature,
+			}
 			instance_ci.enabledLayerCount = u32(len(layers))
 			instance_ci.ppEnabledLayerNames = raw_data(&layers)
+			instance_ci.pNext = &validation_features
 			append(&extensions, vk.EXT_VALIDATION_FEATURES_EXTENSION_NAME)
 		} else {
 			instance_ci.enabledLayerCount = 0
@@ -101,8 +112,16 @@ device_init :: proc(d: ^Device, desc: Device_Desc) {
 			),
 		)
 		for pd, i in physical_devices {
+			d.accel_properties = {
+				sType = .PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_PROPERTIES_KHR,
+			}
+			d.rt_properties = {
+				sType = .PHYSICAL_DEVICE_RAY_TRACING_PIPELINE_PROPERTIES_KHR,
+				pNext = &d.accel_properties,
+			}
 			device_properties := vk.PhysicalDeviceProperties2 {
 				sType = .PHYSICAL_DEVICE_PROPERTIES_2,
+				pNext = &d.rt_properties,
 			}
 			vk.GetPhysicalDeviceProperties2(pd, &device_properties)
 
@@ -161,7 +180,13 @@ device_init :: proc(d: ^Device, desc: Device_Desc) {
 		}
 		num_queues := 1 if d.queues.graphics_family_idx == d.queues.compute_family_idx else 2
 
-		device_extensions := [?]cstring{"VK_KHR_swapchain", "VK_EXT_extended_dynamic_state3"}
+		device_extensions := [?]cstring {
+			vk.KHR_SWAPCHAIN_EXTENSION_NAME,
+			vk.EXT_EXTENDED_DYNAMIC_STATE_3_EXTENSION_NAME,
+			vk.KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME,
+			vk.KHR_RAY_TRACING_PIPELINE_EXTENSION_NAME,
+			vk.KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME,
+		}
 		vk11_features := vk.PhysicalDeviceVulkan11Features {
 			sType                = .PHYSICAL_DEVICE_VULKAN_1_1_FEATURES,
 			shaderDrawParameters = true,
@@ -181,10 +206,11 @@ device_init :: proc(d: ^Device, desc: Device_Desc) {
 			scalarBlockLayout                            = true,
 		}
 		vk13_features := vk.PhysicalDeviceVulkan13Features {
-			sType            = .PHYSICAL_DEVICE_VULKAN_1_3_FEATURES,
-			pNext            = &vk12_features,
-			synchronization2 = true,
-			dynamicRendering = true,
+			sType                          = .PHYSICAL_DEVICE_VULKAN_1_3_FEATURES,
+			pNext                          = &vk12_features,
+			synchronization2               = true,
+			dynamicRendering               = true,
+			shaderDemoteToHelperInvocation = true,
 		}
 		vk10_features := vk.PhysicalDeviceFeatures {
 			samplerAnisotropy        = true,
@@ -192,10 +218,20 @@ device_init :: proc(d: ^Device, desc: Device_Desc) {
 			multiDrawIndirect        = true,
 			fragmentStoresAndAtomics = true,
 		}
+		accel_features := vk.PhysicalDeviceAccelerationStructureFeaturesKHR {
+			sType                 = .PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR,
+			pNext                 = &vk13_features,
+			accelerationStructure = true,
+		}
+		rt_pipeline_features := vk.PhysicalDeviceRayTracingPipelineFeaturesKHR {
+			sType              = .PHYSICAL_DEVICE_RAY_TRACING_PIPELINE_FEATURES_KHR,
+			pNext              = &accel_features,
+			rayTracingPipeline = true,
+		}
 
 		device_ci := vk.DeviceCreateInfo {
 			sType                   = .DEVICE_CREATE_INFO,
-			pNext                   = &vk13_features,
+			pNext                   = &rt_pipeline_features,
 			queueCreateInfoCount    = u32(num_queues),
 			pQueueCreateInfos       = raw_data(&queue_ci),
 			enabledExtensionCount   = u32(len(device_extensions)),
@@ -215,11 +251,54 @@ device_init :: proc(d: ^Device, desc: Device_Desc) {
 		d.queues.graphics,
 		d.queues.graphics_family_idx,
 	)
+
+	desc_pool_sizes := [?]vk.DescriptorPoolSize {
+		{type = .SAMPLER, descriptorCount = MAX_SAMPLERS},
+		{type = .SAMPLED_IMAGE, descriptorCount = MAX_BINDLESS_IMAGES},
+		{type = .STORAGE_IMAGE, descriptorCount = MAX_BINDLESS_IMAGES * 3},
+		{type = .ACCELERATION_STRUCTURE_KHR, descriptorCount = 1},
+	}
+	desc_pool_ci := vk.DescriptorPoolCreateInfo {
+		sType         = .DESCRIPTOR_POOL_CREATE_INFO,
+		maxSets       = 2,
+		poolSizeCount = len(desc_pool_sizes),
+		pPoolSizes    = raw_data(&desc_pool_sizes),
+		flags         = {.UPDATE_AFTER_BIND},
+	}
+	chk(vk.CreateDescriptorPool(d.device, &desc_pool_ci, nil, &d.descriptor_pool))
+
+	// bindless descriptors
 	bindless_init(d)
+
+	// raytracing descriptors
+	rt_desc_layout_bindings := [?]vk.DescriptorSetLayoutBinding {
+		{
+			binding = 0,
+			descriptorType = .ACCELERATION_STRUCTURE_KHR,
+			descriptorCount = 1,
+			stageFlags = {.RAYGEN_KHR, .CLOSEST_HIT_KHR, .ANY_HIT_KHR, .MISS_KHR},
+		},
+	}
+	rt_desc_layout_ci := vk.DescriptorSetLayoutCreateInfo {
+		sType        = .DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+		flags        = {.UPDATE_AFTER_BIND_POOL},
+		bindingCount = len(rt_desc_layout_bindings),
+		pBindings    = raw_data(&rt_desc_layout_bindings),
+	}
+	chk(vk.CreateDescriptorSetLayout(d.device, &rt_desc_layout_ci, nil, &d.rt_descriptor_layout))
+	rt_descriptor_set_ai := vk.DescriptorSetAllocateInfo {
+		sType              = .DESCRIPTOR_SET_ALLOCATE_INFO,
+		descriptorPool     = d.descriptor_pool,
+		descriptorSetCount = 1,
+		pSetLayouts        = &d.rt_descriptor_layout,
+	}
+	chk(vk.AllocateDescriptorSets(d.device, &rt_descriptor_set_ai, &d.rt_descriptor_set))
+
 	free_all(context.temp_allocator)
 }
 
 device_cleanup :: proc(d: ^Device) {
+	vk.DestroyDescriptorSetLayout(d.device, d.rt_descriptor_layout, nil)
 	command_handler_cleanup(&d.command_handler)
 	bindless_cleanup(d)
 	delete(d.available_depth_formats)
@@ -240,10 +319,8 @@ get_memory_flags :: proc(p: Memory_Preset) -> vk.MemoryPropertyFlags {
 	switch p {
 	case .GPU_ONLY:
 		return {.DEVICE_LOCAL}
-
 	case .CPU_UPLOAD:
 		return {.HOST_VISIBLE, .HOST_COHERENT}
-
 	case .CPU_READBACK:
 		return {.HOST_VISIBLE, .HOST_COHERENT}
 	}

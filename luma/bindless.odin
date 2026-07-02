@@ -16,20 +16,6 @@ BINDLESS_STORAGE_HDR_BINDING :: 3
 BINDLESS_STORAGE_RGBA8_BINDING :: 4
 
 bindless_init :: proc(d: ^Device) {
-	desc_pool_sizes := [?]vk.DescriptorPoolSize {
-		{type = .SAMPLER, descriptorCount = MAX_SAMPLERS},
-		{type = .SAMPLED_IMAGE, descriptorCount = MAX_BINDLESS_IMAGES},
-		{type = .STORAGE_IMAGE, descriptorCount = MAX_BINDLESS_IMAGES * 3},
-	}
-	desc_pool_ci := vk.DescriptorPoolCreateInfo {
-		sType         = .DESCRIPTOR_POOL_CREATE_INFO,
-		maxSets       = 1,
-		poolSizeCount = len(desc_pool_sizes),
-		pPoolSizes    = raw_data(&desc_pool_sizes),
-		flags         = {.UPDATE_AFTER_BIND},
-	}
-	chk(vk.CreateDescriptorPool(d.device, &desc_pool_ci, nil, &d.descriptor_pool))
-
 	common_binding_flags := vk.DescriptorBindingFlags{.UPDATE_AFTER_BIND, .PARTIALLY_BOUND}
 	desc_binding_flags_arr := [?]vk.DescriptorBindingFlags {
 		common_binding_flags,
@@ -43,36 +29,44 @@ bindless_init :: proc(d: ^Device) {
 		bindingCount  = len(desc_binding_flags_arr),
 		pBindingFlags = raw_data(&desc_binding_flags_arr),
 	}
+	stage_flags: vk.ShaderStageFlags = {
+		.VERTEX,
+		.FRAGMENT,
+		.COMPUTE,
+		.RAYGEN_KHR,
+		.MISS_KHR,
+		.ANY_HIT_KHR,
+	}
 	desc_layout_bindings := [?]vk.DescriptorSetLayoutBinding {
 		{
 			binding = BINDLESS_SAMPLER_BINDING,
 			descriptorType = .SAMPLER,
 			descriptorCount = MAX_SAMPLERS,
-			stageFlags = {.VERTEX, .FRAGMENT, .COMPUTE},
+			stageFlags = stage_flags,
 		},
 		{
 			binding = BINDLESS_TEXTURE_BINDING,
 			descriptorType = .SAMPLED_IMAGE,
 			descriptorCount = MAX_BINDLESS_IMAGES,
-			stageFlags = {.VERTEX, .FRAGMENT, .COMPUTE},
+			stageFlags = stage_flags,
 		},
 		{
 			binding = BINDLESS_STORAGE_U32_BINDING,
 			descriptorType = .STORAGE_IMAGE,
 			descriptorCount = MAX_BINDLESS_IMAGES,
-			stageFlags = {.VERTEX, .FRAGMENT, .COMPUTE},
+			stageFlags = stage_flags,
 		},
 		{
 			binding = BINDLESS_STORAGE_HDR_BINDING,
 			descriptorType = .STORAGE_IMAGE,
 			descriptorCount = MAX_BINDLESS_IMAGES,
-			stageFlags = {.VERTEX, .FRAGMENT, .COMPUTE},
+			stageFlags = stage_flags,
 		},
 		{
 			binding = BINDLESS_STORAGE_RGBA8_BINDING,
 			descriptorType = .STORAGE_IMAGE,
 			descriptorCount = MAX_BINDLESS_IMAGES,
-			stageFlags = {.VERTEX, .FRAGMENT, .COMPUTE},
+			stageFlags = stage_flags,
 		},
 	}
 	desc_layout_ci := vk.DescriptorSetLayoutCreateInfo {

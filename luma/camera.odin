@@ -16,16 +16,14 @@ Camera :: struct {
 }
 
 create_camera :: proc() -> Camera {
-	rotation: glsl.quat
-	rotation.w = 1
 	return Camera {
 		near = 0.01,
 		far = 100.0,
 		move_speed = 4.0,
 		look_sensitivity = 0.2,
 		fov = 60.0,
-		position = glsl.vec3{0.0, 0.0, 5.0},
-		rotation = rotation,
+		position = glsl.vec3{5.0, 1.0, -0.3},
+		rotation = la.quaternion_from_euler_angle_y_f32(math.PI / 2),
 		proj = glsl.mat4(1.0),
 	}
 }

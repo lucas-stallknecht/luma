@@ -1,5 +1,6 @@
 package luma
 
+import "base:intrinsics"
 import "core:fmt"
 import "core:math/linalg/glsl"
 import "core:os"
@@ -21,6 +22,8 @@ Scene :: struct {
 	draw_data_buffer:    Buffer,
 	draw_command_buffer: Buffer,
 	texture_images:      []Image,
+	blas:                []Acceleration_Structure,
+	tlas:                Acceleration_Structure,
 }
 
 Header :: struct {
@@ -97,7 +100,11 @@ scene_init :: proc(scene: ^Scene, device: ^Device, path: string) {
 		raw_data(positions),
 		{
 			size = vk.DeviceSize(header.positions_size),
-			usage = {.STORAGE_BUFFER, .SHADER_DEVICE_ADDRESS},
+			usage = {
+				.STORAGE_BUFFER,
+				.SHADER_DEVICE_ADDRESS,
+				.ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_KHR,
+			},
 			memory = .GPU_ONLY,
 		},
 	)
@@ -154,7 +161,11 @@ scene_init :: proc(scene: ^Scene, device: ^Device, path: string) {
 		raw_data(indices),
 		{
 			size = vk.DeviceSize(header.indices_size),
-			usage = {.INDEX_BUFFER, .SHADER_DEVICE_ADDRESS},
+			usage = {
+				.INDEX_BUFFER,
+				.SHADER_DEVICE_ADDRESS,
+				.ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_KHR,
+			},
 			memory = .GPU_ONLY,
 		},
 	)
@@ -208,7 +219,7 @@ scene_init :: proc(scene: ^Scene, device: ^Device, path: string) {
 				usage = {.SAMPLED, .TRANSFER_SRC},
 				memory = .GPU_ONLY,
 				register_bindless = .Texture,
-				mips = true
+				mips = true,
 			},
 		)
 	}
@@ -245,14 +256,60 @@ scene_init :: proc(scene: ^Scene, device: ^Device, path: string) {
 		},
 	)
 
-	// renderables
+	// renderables, BLAS and TLAS instances
 	renderables_bytes := data[header.renderables_offset:header.renderables_offset +
 	header.renderables_size]
 	renderables := ([^]Renderable)(raw_data(renderables_bytes))
 
 	renderable_count := header.renderables_size / size_of(Renderable)
-	draw_data := make([]Draw_Data, renderable_count)
-	draw_commands := make([]vk.DrawIndexedIndirectCommand, renderable_count)
+	draw_data := make([]Draw_Data, renderable_count, context.temp_allocator)
+	draw_commands := make(
+		[]vk.DrawIndexedIndirectCommand,
+		renderable_count,
+		context.temp_allocator,
+	)
+
+	// position/index buffer uploads above must finish before the BLAS builds below read them
+	buffer_barriers(
+		cb,
+		{
+			buffer = &scene.position_buffer,
+			src_stage = {.TRANSFER},
+			src_access = {.TRANSFER_WRITE},
+			dst_stage = {.ACCELERATION_STRUCTURE_BUILD_KHR},
+			dst_access = {.ACCELERATION_STRUCTURE_READ_KHR},
+		},
+		{
+			buffer = &scene.index_buffer,
+			src_stage = {.TRANSFER},
+			src_access = {.TRANSFER_WRITE},
+			dst_stage = {.ACCELERATION_STRUCTURE_BUILD_KHR},
+			dst_access = {.ACCELERATION_STRUCTURE_READ_KHR},
+		},
+	)
+
+	blas_triangles := vk.AccelerationStructureGeometryTrianglesDataKHR {
+		sType = .ACCELERATION_STRUCTURE_GEOMETRY_TRIANGLES_DATA_KHR,
+		vertexFormat = .R32G32B32_SFLOAT,
+		vertexData = {deviceAddress = scene.position_buffer.device_address},
+		vertexStride = size_of(glsl.vec3),
+		maxVertex = u32(len(positions) / 3) - 1,
+		indexType = .UINT32,
+		indexData = {deviceAddress = scene.index_buffer.device_address},
+	}
+	blas_geometry := vk.AccelerationStructureGeometryKHR {
+		sType = .ACCELERATION_STRUCTURE_GEOMETRY_KHR,
+		geometryType = .TRIANGLES,
+		geometry = {triangles = blas_triangles},
+		flags = {.NO_DUPLICATE_ANY_HIT_INVOCATION, .OPAQUE},
+	}
+	scene.blas = make([]Acceleration_Structure, renderable_count)
+
+	tlas_instances := make(
+		[]vk.AccelerationStructureInstanceKHR,
+		renderable_count,
+		context.temp_allocator,
+	)
 
 	triangle_base: u32 = 0
 	for i in 0 ..< renderable_count {
@@ -270,11 +327,39 @@ scene_init :: proc(scene: ^Scene, device: ^Device, path: string) {
 			vertexOffset  = 0,
 		}
 
-		triangle_base += rend.index_count / 3
-	}
-	defer {
-		delete(draw_data)
-		delete(draw_commands)
+		triangle_count := rend.index_count / 3
+		triangle_base += triangle_count
+
+		// one per renderable / mesh for now
+		blas_range_info := vk.AccelerationStructureBuildRangeInfoKHR {
+			primitiveOffset = rend.index_offset * size_of(u32),
+			primitiveCount  = triangle_count,
+		}
+		blas_build_info := vk.AccelerationStructureBuildGeometryInfoKHR {
+			sType         = .ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR,
+			type          = .BOTTOM_LEVEL,
+			flags         = {.PREFER_FAST_TRACE},
+			mode          = .BUILD,
+			geometryCount = 1,
+			pGeometries   = &blas_geometry,
+		}
+
+		scene.blas[i] = build_acceleration_structure(
+			device,
+			&temp_pool,
+			cb,
+			blas_build_info,
+			blas_range_info,
+		)
+
+		tlas_instances[i] = {
+			transform                              = to_transform_matrixKHR(&rend.transform),
+			instanceCustomIndex                    = i,
+			instanceShaderBindingTableRecordOffset = 0,
+			flags                                  = .TRIANGLE_CULL_DISABLE_NV,
+			mask                                   = 0xFF,
+			accelerationStructureReference         = u64(scene.blas[i].device_address),
+		}
 	}
 
 	scene.draw_data_buffer = create_and_upload_buffer(
@@ -302,6 +387,76 @@ scene_init :: proc(scene: ^Scene, device: ^Device, path: string) {
 	scene.draw_count = u32(len(draw_commands))
 	fmt.println("- draw count     :", scene.draw_count)
 
+	// TLAS
+	tlas_instances_buffer := create_and_upload_buffer(
+		device,
+		&temp_pool,
+		cb,
+		raw_data(tlas_instances),
+		{
+			size = vk.DeviceSize(
+				len(tlas_instances) * size_of(vk.AccelerationStructureInstanceKHR),
+			),
+			memory = .GPU_ONLY,
+			usage = {.ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_KHR, .SHADER_DEVICE_ADDRESS},
+		},
+	)
+	append(&temp_pool, tlas_instances_buffer)
+	buffer_barriers(
+		cb,
+		{
+			buffer = &tlas_instances_buffer,
+			src_stage = {.TRANSFER},
+			src_access = {.TRANSFER_WRITE},
+			dst_stage = {.ACCELERATION_STRUCTURE_BUILD_KHR},
+			dst_access = {.ACCELERATION_STRUCTURE_READ_KHR},
+		},
+	)
+	geometry_instances := vk.AccelerationStructureGeometryInstancesDataKHR {
+		sType = .ACCELERATION_STRUCTURE_GEOMETRY_INSTANCES_DATA_KHR,
+		data = {deviceAddress = tlas_instances_buffer.device_address},
+	}
+	tlas_geometry := vk.AccelerationStructureGeometryKHR {
+		sType = .ACCELERATION_STRUCTURE_GEOMETRY_KHR,
+		geometryType = .INSTANCES,
+		geometry = {instances = geometry_instances},
+	}
+	tlas_range_info := vk.AccelerationStructureBuildRangeInfoKHR {
+		primitiveCount = renderable_count,
+	}
+
+	// BLAS builds above must finish before the TLAS build reads them via the instance buffer
+	accel_barrier := vk.MemoryBarrier2 {
+		sType         = .MEMORY_BARRIER_2,
+		srcStageMask  = {.ACCELERATION_STRUCTURE_BUILD_KHR},
+		srcAccessMask = {.ACCELERATION_STRUCTURE_WRITE_KHR},
+		dstStageMask  = {.ACCELERATION_STRUCTURE_BUILD_KHR},
+		dstAccessMask = {.ACCELERATION_STRUCTURE_READ_KHR},
+	}
+	accel_dep := vk.DependencyInfo {
+		sType              = .DEPENDENCY_INFO,
+		memoryBarrierCount = 1,
+		pMemoryBarriers    = &accel_barrier,
+	}
+	vk.CmdPipelineBarrier2(cb, &accel_dep)
+
+	tlas_build_info := vk.AccelerationStructureBuildGeometryInfoKHR {
+		sType         = .ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR,
+		type          = .TOP_LEVEL,
+		flags         = {.PREFER_FAST_TRACE},
+		mode          = .BUILD,
+		geometryCount = 1,
+		pGeometries   = &tlas_geometry,
+	}
+	scene.tlas = build_acceleration_structure(
+		device,
+		&temp_pool,
+		cb,
+		tlas_build_info,
+		tlas_range_info,
+	)
+	write_tlas_descriptor(device, &scene.tlas)
+
 	command_handler_submit(&device.command_handler, handle, false)
 	command_handler_wait(&device.command_handler, handle)
 
@@ -312,6 +467,11 @@ scene_init :: proc(scene: ^Scene, device: ^Device, path: string) {
 }
 
 scene_cleanup :: proc(scene: ^Scene, device: ^Device) {
+	for &blas in scene.blas {
+		destroy_acceleration_structure(device, &blas)
+	}
+	delete(scene.blas)
+	destroy_acceleration_structure(device, &scene.tlas)
 	destroy_buffer(device, &scene.position_buffer)
 	destroy_buffer(device, &scene.normal_buffer)
 	destroy_buffer(device, &scene.tangent_buffer)
@@ -371,4 +531,10 @@ get_texture_bindless_idx :: proc(images: []Image, idx: i32) -> i32 {
 
 	image := images[idx]
 	return i32(image.bindless_idx) if image.image != 0 else -1
+}
+
+@(private = "file")
+to_transform_matrixKHR :: proc(m: ^[16]f32) -> (t: vk.TransformMatrixKHR) {
+	intrinsics.mem_copy(&t, m, size_of(vk.TransformMatrixKHR))
+	return t
 }

@@ -1,12 +1,11 @@
 package luma
 
 import "core:fmt"
-import la "core:math/linalg"
 import "core:math/linalg/glsl"
 import "core:mem"
 import "vendor:glfw"
-import vk "vendor:vulkan"
 import mu "vendor:microui"
+import vk "vendor:vulkan"
 
 device_selection_fn :: proc(idx: int, properties: vk.PhysicalDeviceProperties2) -> bool {
 	return idx == 0
@@ -292,10 +291,10 @@ main :: proc() {
 		proj_view := camera.proj * camera_get_view(&camera)
 		frame_data := Frame_Data {
 			proj_view_matrix     = proj_view,
-			inv_proj_view_matrix = la.inverse(proj_view),
+			inv_proj_view_matrix = glsl.inverse(proj_view),
 			camera_position      = camera.position,
 			texture_sampler      = texture_sampler_idx,
-			light_dir            = la.normalize(light_dir),
+			light_dir            = glsl.normalize(light_dir),
 			light_color          = light_color,
 		}
 		frame_data_buffer := &frame_data_buffers[handle.buffer_idx]
@@ -322,7 +321,6 @@ main :: proc() {
 			},
 		)
 
-		t := f32(swapchain.frame_idx) * 0.0005
 		color_attachments := vk.RenderingAttachmentInfo {
 			sType = .RENDERING_ATTACHMENT_INFO,
 			imageView = visbuffer.view,
