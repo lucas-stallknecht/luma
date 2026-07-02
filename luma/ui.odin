@@ -99,8 +99,7 @@ ui_init :: proc(
 		pipeline_manager,
 		{
 			name = "ui",
-			vertex_shader = "ui.vert",
-			fragment_shader = "ui.frag",
+			shader = "ui.glsl",
 			raster = {primitive_topology = .TRIANGLE_LIST},
 			push_constant_size = size_of(Ui_Push),
 			color_attachments = {{format = color_format, blend = .Alpha}},

@@ -63,8 +63,8 @@ pipeline_reload_all :: proc(m: ^Pipeline_Manager) -> bool {
 
 	all_ok := true
 	for name, &pipeline in m.raster_pipelines {
-		v, v_ok := compile_and_load_spirv(m, pipeline.info.vertex_shader)
-		f, f_ok := compile_and_load_spirv(m, pipeline.info.fragment_shader)
+		v, v_ok := compile_and_load_spirv(m, pipeline.info.shader, .VERTEX)
+		f, f_ok := compile_and_load_spirv(m, pipeline.info.shader, .FRAGMENT)
 		if !(v_ok && f_ok) {
 			all_ok = false
 			// keep compiling the rest so the user gets full diagnostics
@@ -77,7 +77,7 @@ pipeline_reload_all :: proc(m: ^Pipeline_Manager) -> bool {
 		}{name = name, vertex = v, fragment = f})
 	}
 	for name, &pipeline in m.compute_pipelines {
-		c, ok := compile_and_load_spirv(m, pipeline.info.shader)
+		c, ok := compile_and_load_spirv(m, pipeline.info.shader, .COMPUTE)
 		if !ok {
 			all_ok = false
 			continue
@@ -153,8 +153,7 @@ Depth_Test :: struct {
 }
 
 Raster_Pipeline_Info :: struct {
-	vertex_shader:      string,
-	fragment_shader:    string,
+	shader:             string, // single .glsl file compiled twice, once per stage (see push_stage/compile_and_load_spirv)
 	color_attachments:  []struct {
 		format: vk.Format,
 		blend:  Maybe(Blend_Preset),
@@ -209,13 +208,13 @@ create_raster_pipeline :: proc(m: ^Pipeline_Manager, pipeline: ^Raster_Pipeline)
 	// if cached SPIR-V is empty, try compiling the shaders. When performing
 	// a reload we pre-populate cached_spirv, so this avoids recompiling.
 	if len(pipeline.cached_spirv.vertex) == 0 {
-		vertex_spv, vertex_ok := compile_and_load_spirv(m, info.vertex_shader)
+		vertex_spv, vertex_ok := compile_and_load_spirv(m, info.shader, .VERTEX)
 		if vertex_ok {
 			pipeline.cached_spirv.vertex = vertex_spv
 		}
 	}
 	if len(pipeline.cached_spirv.fragment) == 0 {
-		fragment_spv, fragment_ok := compile_and_load_spirv(m, info.fragment_shader)
+		fragment_spv, fragment_ok := compile_and_load_spirv(m, info.shader, .FRAGMENT)
 		if fragment_ok {
 			pipeline.cached_spirv.fragment = fragment_spv
 		}
@@ -396,8 +395,7 @@ destroy_raster_pipeline :: proc(device: vk.Device, pipeline: ^Raster_Pipeline) {
 @(private = "file")
 raster_info_clone :: proc(src: Raster_Pipeline_Info) -> (dst: Raster_Pipeline_Info) {
 	dst = src
-	dst.vertex_shader = strings.clone(src.vertex_shader)
-	dst.fragment_shader = strings.clone(src.fragment_shader)
+	dst.shader = strings.clone(src.shader)
 	dst.color_attachments = slice.clone(src.color_attachments)
 	dst.name = strings.clone(src.name)
 	return
@@ -405,8 +403,7 @@ raster_info_clone :: proc(src: Raster_Pipeline_Info) -> (dst: Raster_Pipeline_In
 
 @(private = "file")
 raster_info_free :: proc(info: ^Raster_Pipeline_Info) {
-	delete(info.vertex_shader)
-	delete(info.fragment_shader)
+	delete(info.shader)
 	delete(info.color_attachments)
 	delete(info.name)
 }
@@ -499,7 +496,7 @@ create_compute_pipeline :: proc(m: ^Pipeline_Manager, pipeline: ^Compute_Pipelin
 	info := &pipeline.info
 
 	if len(pipeline.cached_spirv) == 0 {
-		spv, ok := compile_and_load_spirv(m, info.shader)
+		spv, ok := compile_and_load_spirv(m, info.shader, .COMPUTE)
 		if ok {
 			pipeline.cached_spirv = spv
 		}
@@ -597,11 +594,52 @@ push_stage :: proc(
 	}
 }
 
+// a single .glsl source file is compiled once per stage it's used in.
+//
+// each stage's hardcoded entry (vert_main/frag_main) is macro-renamed to "main" at compile
+// time via -D, and code specific to a stage is guarded with #ifdef STAGE_VERTEX | STAGE_FRAGMENT | STAGE_COMPUTE.
 @(private = "file")
-compile_and_load_spirv :: proc(m: ^Pipeline_Manager, path: string) -> ([]u32, bool) #optional_ok {
+VERTEX_DEFINES := [?]string{"-DSTAGE_VERTEX", "-Dvert_main=main"}
+@(private = "file")
+FRAGMENT_DEFINES := [?]string{"-DSTAGE_FRAGMENT", "-Dfrag_main=main"}
+@(private = "file")
+COMPUTE_DEFINES := [?]string{"-DSTAGE_COMPUTE"}
+
+@(private = "file")
+shader_stage_build_flags :: proc(
+	flag: vk.ShaderStageFlag,
+) -> (
+	glslc_stage: string,
+	file_ext: string,
+	defines: []string,
+) {
+	#partial switch flag {
+	case .VERTEX:
+		return "vertex", "vert", VERTEX_DEFINES[:]
+	case .FRAGMENT:
+		return "fragment", "frag", FRAGMENT_DEFINES[:]
+	case .COMPUTE:
+		return "compute", "comp", COMPUTE_DEFINES[:]
+	case:
+		fmt.panicf("Unsupported shader stage", flag)
+	}
+}
+
+@(private = "file")
+compile_and_load_spirv :: proc(
+	m: ^Pipeline_Manager,
+	path: string,
+	stage: vk.ShaderStageFlag,
+) -> (
+	[]u32,
+	bool,
+) #optional_ok {
+	glslc_stage, file_ext, defines := shader_stage_build_flags(stage)
+
 	src_path := strings.concatenate({m.shader_directory, path}, context.temp_allocator)
+	stem := filepath.stem(path)
 	dst_path := strings.concatenate(
-		{m.compile_shader_directory, path, ".spv"},
+		{m.compile_shader_directory, stem, ".", file_ext, ".spv"},
 		context.temp_allocator,
 	)
 
@@ -613,8 +651,14 @@ compile_and_load_spirv :: proc(m: ^Pipeline_Manager, path: string) -> ([]u32, bo
 		}
 	}
 
+	command := make([dynamic]string, context.temp_allocator)
+	append(&command, "glslc", "--target-env=vulkan1.3")
+	append(&command, fmt.tprintf("-fshader-stage=%s", glslc_stage))
+	append(&command, ..defines)
+	append(&command, src_path, "-o", dst_path)
+
 	state, stdout, stderr, proc_err := os.process_exec(
-		{command = {"glslc", "--target-env=vulkan1.3", src_path, "-o", dst_path}},
+		{command = command[:]},
 		context.temp_allocator,
 	)
 	if proc_err != nil {

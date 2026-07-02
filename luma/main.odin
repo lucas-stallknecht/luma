@@ -82,8 +82,7 @@ main :: proc() {
 		&pipeline_manager,
 		{
 			name = "visbuffer",
-			vertex_shader = "visbuffer.vert",
-			fragment_shader = "visbuffer.frag",
+			shader = "visbuffer.glsl",
 			raster = {primitive_topology = .TRIANGLE_LIST, front_face = .CLOCKWISE},
 			push_constant_size = size_of(Visbuffer_Push),
 			color_attachments = {{format = .R32G32_UINT}},
@@ -98,7 +97,7 @@ main :: proc() {
 	Shading_Push :: struct {
 		frame_data:       vk.DeviceAddress,
 		visbuffer:        u32,
-		out_image:        u32,
+		draw_image:       u32,
 		index_buffer:     vk.DeviceAddress,
 		vertex_buffer:    vk.DeviceAddress,
 		draw_data_buffer: vk.DeviceAddress,
@@ -124,8 +123,7 @@ main :: proc() {
 		&pipeline_manager,
 		{
 			name = "visbuffer_present",
-			vertex_shader = "present.vert",
-			fragment_shader = "present.frag",
+			shader = "present.glsl",
 			raster = {primitive_topology = .TRIANGLE_LIST},
 			push_constant_size = size_of(Present_Push),
 			color_attachments = {{format = swapchain.format}},
@@ -195,8 +193,8 @@ main :: proc() {
 	texture_sampler_idx := bindless_register_sampler(&device, texture_sampler)
 
 	Frame_Data :: struct {
-		proj_view_matrix:     glsl.mat4,
-		inv_proj_view_matrix: glsl.mat4,
+		proj_view:     glsl.mat4,
+		inv_proj_view: glsl.mat4,
 		camera_position:      glsl.vec3,
 		texture_sampler:      u32,
 		light_dir:            glsl.vec3,
@@ -331,8 +329,8 @@ main :: proc() {
 
 		proj_view := camera.proj * camera_get_view(&camera)
 		frame_data := Frame_Data {
-			proj_view_matrix     = proj_view,
-			inv_proj_view_matrix = glsl.inverse(proj_view),
+			proj_view     = proj_view,
+			inv_proj_view = glsl.inverse(proj_view),
 			camera_position      = camera.position,
 			texture_sampler      = texture_sampler_idx,
 			light_dir            = glsl.normalize(light_dir),
@@ -445,7 +443,7 @@ main :: proc() {
 		shading_pc := Shading_Push {
 			frame_data       = frame_data_buffer.device_address,
 			visbuffer        = visbuffer.bindless_idx,
-			out_image        = draw_image.bindless_idx,
+			draw_image       = draw_image.bindless_idx,
 			index_buffer     = scene.index_buffer.device_address,
 			vertex_buffer    = scene.position_buffer.device_address,
 			draw_data_buffer = scene.draw_data_buffer.device_address,

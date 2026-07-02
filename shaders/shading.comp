@@ -10,7 +10,7 @@ layout(binding = 0, set = 1) uniform accelerationStructureEXT tlas;
 layout(push_constant) uniform PushConstants {
     FrameDataBuffer frame_data;
     uint visbuffer;
-    uint out_image;
+    uint draw_image;
     IndexBuffer index_buffer;
     VertexBuffer vertex_buffer;
     DrawDataBuffer draw_data_buffer;
@@ -45,9 +45,9 @@ vec3 moller_trumbore(vec3 p0, vec3 p1, vec3 p2, vec3 ray_origin, vec3 ray_dir) {
     return vec3(1.0 - u - v, u, v);
 }
 
-vec3 pixel_bary(ivec2 px, ivec2 size, mat4 inv_proj_view, vec3 camera_position, vec3 p0w, vec3 p1w, vec3 p2w) {
+vec3 pixel_bary(ivec2 coord, ivec2 size, mat4 inv_proj_view, vec3 camera_position, vec3 p0w, vec3 p1w, vec3 p2w) {
     // reconstruct the world-space ray through this pixel's center
-    vec2 ndc = (vec2(px) + 0.5) / vec2(size) * 2.0 - 1.0;
+    vec2 ndc = (vec2(coord) + 0.5) / vec2(size) * 2.0 - 1.0;
     vec4 far = inv_proj_view * vec4(ndc, 1.0, 1.0);
     far /= far.w;
     vec3 ray_dir = normalize(far.xyz - camera_position);
@@ -63,17 +63,17 @@ void main() {
     uint triangle_id = pix.r;
 
     if (triangle_id == 0) {
-        imageStore(F32(push.out_image), coord, vec4(0.0, 0.0, 0.0, 1.0));
+        imageStore(F32(push.draw_image), coord, vec4(0.0, 0.0, 0.0, 1.0));
         return;
     }
 
     DrawData draw = push.draw_data_buffer.draw_data[pix.g];
     Material material = push.material_buffer.materials[draw.material_idx];
 
-    uint tri_idx = triangle_id - 1;
-    uint i0 = push.index_buffer.indices[tri_idx * 3 + 0];
-    uint i1 = push.index_buffer.indices[tri_idx * 3 + 1];
-    uint i2 = push.index_buffer.indices[tri_idx * 3 + 2];
+    uint triangle_idx = triangle_id - 1;
+    uint i0 = push.index_buffer.indices[triangle_idx * 3 + 0];
+    uint i1 = push.index_buffer.indices[triangle_idx * 3 + 1];
+    uint i2 = push.index_buffer.indices[triangle_idx * 3 + 2];
 
     vec3 p0 = push.vertex_buffer.positions[i0];
     vec3 p1 = push.vertex_buffer.positions[i1];
@@ -83,15 +83,15 @@ void main() {
     vec3 p1w = vec3(draw.transform * vec4(p1, 1.0));
     vec3 p2w = vec3(draw.transform * vec4(p2, 1.0));
 
-    mat4 inv_proj_view = push.frame_data.data.inv_proj_view_matrix;
+    mat4 inv_proj_view = push.frame_data.data.inv_proj_view;
     vec3 camera_position = push.frame_data.data.camera_position;
 
     vec3 bary = pixel_bary(coord, size, inv_proj_view, camera_position, p0w, p1w, p2w);
-    vec3 bary_ddx = pixel_bary(coord + ivec2(1, 0), size, inv_proj_view, camera_position, p0w, p1w, p2w);
-    vec3 bary_ddy = pixel_bary(coord + ivec2(0, 1), size, inv_proj_view, camera_position, p0w, p1w, p2w);
+    vec3 bary_x1 = pixel_bary(coord + ivec2(1, 0), size, inv_proj_view, camera_position, p0w, p1w, p2w);
+    vec3 bary_y1 = pixel_bary(coord + ivec2(0, 1), size, inv_proj_view, camera_position, p0w, p1w, p2w);
 
-    vec3 d_bary_dx = bary_ddx - bary;
-    vec3 d_bary_dy = bary_ddy - bary;
+    vec3 bary_ddx = bary_x1 - bary;
+    vec3 bary_ddy = bary_y1 - bary;
 
     vec2 uv0 = push.uv_buffer.uvs[i0];
     vec2 uv1 = push.uv_buffer.uvs[i1];
@@ -101,8 +101,8 @@ void main() {
     uv.y = 1.0 - uv.y;
 
     // derivative of (1 - uv.y) is -(d uv.y), so negate the y component
-    vec2 uv_ddx = d_bary_dx.x * uv0 + d_bary_dx.y * uv1 + d_bary_dx.z * uv2;
-    vec2 uv_ddy = d_bary_dy.x * uv0 + d_bary_dy.y * uv1 + d_bary_dy.z * uv2;
+    vec2 uv_ddx = bary_ddx.x * uv0 + bary_ddx.y * uv1 + bary_ddx.z * uv2;
+    vec2 uv_ddy = bary_ddy.x * uv0 + bary_ddy.y * uv1 + bary_ddy.z * uv2;
     uv_ddx.y = -uv_ddx.y;
     uv_ddy.y = -uv_ddy.y;
 
@@ -149,5 +149,5 @@ void main() {
     float shadow = float(!occluder_hit);
     vec3 color = (ambient + push.frame_data.data.light_color * push.frame_data.data.light_intensity * shadow * diffuse) * albedo;
 
-    imageStore(F32(push.out_image), coord, vec4(color, 1.0));
+    imageStore(F32(push.draw_image), coord, vec4(color, 1.0));
 }
