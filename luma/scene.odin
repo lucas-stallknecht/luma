@@ -170,15 +170,19 @@ scene_init :: proc(scene: ^Scene, device: ^Device, path: string) {
 		},
 	)
 
-	// pre-scan materials to identify which texture indices are normal maps (linear data)
+	// pre-scan materials to identify which texture indices hold linear (non-color) data,
+	// such as normal and metallic-roughness textures, as opposed to sRGB color textures
 	materials_bytes := data[header.materials_offset:header.materials_offset +
 	header.materials_size]
 	materials := slice.reinterpret([]Material, materials_bytes)
 
-	normal_map_indices := make(map[i32]bool, context.temp_allocator)
+	linear_data_indices := make(map[i32]bool, context.temp_allocator)
 	for mat in materials {
 		if mat.normal_tex_idx >= 0 {
-			normal_map_indices[mat.normal_tex_idx] = true
+			linear_data_indices[mat.normal_tex_idx] = true
+		}
+		if mat.metallic_roughness_tex_idx >= 0 {
+			linear_data_indices[mat.metallic_roughness_tex_idx] = true
 		}
 	}
 
@@ -202,7 +206,7 @@ scene_init :: proc(scene: ^Scene, device: ^Device, path: string) {
 		defer stbi.image_free(tex_data)
 
 		format: vk.Format = .R8G8B8A8_SRGB
-		if i32(i) in normal_map_indices {
+		if i32(i) in linear_data_indices {
 			format = .R8G8B8A8_UNORM
 		}
 

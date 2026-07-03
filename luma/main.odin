@@ -207,7 +207,7 @@ main :: proc() {
 	}
 	light_dir := glsl.vec3{0.1, 1.0, -0.1}
 	light_color := glsl.vec3{1.0, 1.0, 1.0}
-	light_intensity: f32 = 1.0
+	light_intensity: f32 = 4.0
 	ambient_color := glsl.vec3{1.0, 1.0, 1.0}
 	ambient_intensity: f32 = 0.1
 	ssao_radius: f32 = 0.3
@@ -306,7 +306,7 @@ main :: proc() {
 
 			mu.layout_row(&ui.ctx, {-1}, 0)
 			mu.label(&ui.ctx, "Light intensity")
-			mu.slider(&ui.ctx, &light_intensity, 0, 4)
+			mu.slider(&ui.ctx, &light_intensity, 0, 10)
 
 			mu.layout_row(&ui.ctx, {-1}, 0)
 			mu.label(&ui.ctx, "Ambient color")

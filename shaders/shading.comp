@@ -5,6 +5,7 @@
 #include "luma.glsl"
 #include "types.glsl"
 #include "random.glsl"
+#include "brdf.glsl"
 
 #define NORMAL_BIAS 0.001
 #define SSAO_N_SAMPLES 4
@@ -125,23 +126,31 @@ void main() {
     vec3 bitangent = cross(normal, tangent) * t0.w;
     mat3 TBN = mat3(tangent, bitangent, normal);
 
+    Surface surface;
+    surface.albedo = material.base_color;
+    surface.normal = normal;
+    surface.roughness = 0.5;
+    surface.metallic = 0.0;
+
     if (material.normal_tex >= 0) {
         vec3 tex_normal = textureGrad(TEX(material.normal_tex, frame_data.texture_sampler), uv, uv_ddx, uv_ddy).rgb;
         tex_normal = tex_normal * 2.0 - 1.0;
-
-        normal = normalize(TBN * tex_normal);
+        surface.normal = normalize(TBN * tex_normal);
     }
-
-    vec3 albedo = material.base_color;
 
     if (material.base_color_tex >= 0) {
         vec4 tex_color = textureGrad(TEX(material.base_color_tex, frame_data.texture_sampler), uv, uv_ddx, uv_ddy);
-        albedo.rgb *= tex_color.rgb;
+        surface.albedo *= tex_color.rgb;
+    }
+    if (material.metallic_roughness_tex >= 0) {
+        vec4 tex_value = textureGrad(TEX(material.metallic_roughness_tex, frame_data.texture_sampler), uv, uv_ddx, uv_ddy);
+        surface.roughness = tex_value.g;
+        surface.metallic = tex_value.b;
     }
 
     // directional shadow mapping
     vec3 world_pos = bary.x * p0w + bary.y * p1w + bary.z * p2w;
-    vec3 ray_origin = world_pos + normal * NORMAL_BIAS;
+    vec3 ray_origin = world_pos + surface.normal * NORMAL_BIAS;
     rayQueryEXT ray_query;
     rayQueryInitializeEXT(
         ray_query, tlas, gl_RayFlagsTerminateOnFirstHitEXT | gl_RayFlagsOpaqueEXT,
@@ -171,9 +180,11 @@ void main() {
     float ao = acc / float(SSAO_N_SAMPLES);
     ao = pow(ao, frame_data.ssao_pow);
 
-    vec3 ambient = frame_data.ambient_color * frame_data.ambient_intensity;
-    vec3 diffuse = dot(normal, frame_data.light_dir) * frame_data.light_color * frame_data.light_intensity;
-    vec3 color = (ao * ambient + shadow * diffuse) * albedo;
+    vec3 view_dir = normalize(camera_position - world_pos);
+
+    vec3 ambient = frame_data.ambient_color * frame_data.ambient_intensity * surface.albedo;
+    vec3 direct_lighting = evaluate_BRDF(surface, view_dir, frame_data.light_dir) * frame_data.light_color * frame_data.light_intensity;
+    vec3 color = ao * ambient + shadow * direct_lighting;
 
     imageStore(F32(push.draw_image), coord, vec4(color, 1.0));
 }
