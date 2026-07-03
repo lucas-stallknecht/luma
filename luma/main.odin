@@ -193,21 +193,25 @@ main :: proc() {
 	texture_sampler_idx := bindless_register_sampler(&device, texture_sampler)
 
 	Frame_Data :: struct {
-		proj_view:     glsl.mat4,
-		inv_proj_view: glsl.mat4,
-		camera_position:      glsl.vec3,
-		texture_sampler:      u32,
-		light_dir:            glsl.vec3,
-		ambient_intensity:    f32,
-		light_color:          glsl.vec3,
-		light_intensity:      f32,
-		ambient_color:        glsl.vec3,
+		proj_view:         glsl.mat4,
+		inv_proj_view:     glsl.mat4,
+		camera_position:   glsl.vec3,
+		texture_sampler:   u32,
+		light_dir:         glsl.vec3,
+		ambient_intensity: f32,
+		light_color:       glsl.vec3,
+		light_intensity:   f32,
+		ambient_color:     glsl.vec3,
+		ssao_radius:       f32,
+		ssao_pow:          f32,
 	}
 	light_dir := glsl.vec3{0.1, 1.0, -0.1}
 	light_color := glsl.vec3{1.0, 1.0, 1.0}
-	light_intensity := f32(1.0)
+	light_intensity: f32 = 1.0
 	ambient_color := glsl.vec3{1.0, 1.0, 1.0}
-	ambient_intensity := f32(0.1)
+	ambient_intensity: f32 = 0.1
+	ssao_radius: f32 = 0.3
+	ssao_pow: f32 = 2.0
 
 	// one buffer per in-flight command buffer slot, so the CPU never overwrites frame
 	// data the GPU hasn't finished reading yet
@@ -320,6 +324,14 @@ main :: proc() {
 			mu.layout_row(&ui.ctx, {-1}, 0)
 			mu.label(&ui.ctx, "Ambient intensity")
 			mu.slider(&ui.ctx, &ambient_intensity, 0, 1)
+
+			mu.layout_row(&ui.ctx, {-1}, 0)
+			mu.label(&ui.ctx, "SSAO radius")
+			mu.slider(&ui.ctx, &ssao_radius, 0, 2)
+
+			mu.layout_row(&ui.ctx, {-1}, 0)
+			mu.label(&ui.ctx, "SSAO power")
+			mu.slider(&ui.ctx, &ssao_pow, 0.1, 8)
 		}
 		mu.end(&ui.ctx)
 
@@ -329,15 +341,17 @@ main :: proc() {
 
 		proj_view := camera.proj * camera_get_view(&camera)
 		frame_data := Frame_Data {
-			proj_view     = proj_view,
-			inv_proj_view = glsl.inverse(proj_view),
-			camera_position      = camera.position,
-			texture_sampler      = texture_sampler_idx,
-			light_dir            = glsl.normalize(light_dir),
-			light_color          = light_color,
-			light_intensity      = light_intensity,
-			ambient_color        = ambient_color,
-			ambient_intensity    = ambient_intensity,
+			proj_view         = proj_view,
+			inv_proj_view     = glsl.inverse(proj_view),
+			camera_position   = camera.position,
+			texture_sampler   = texture_sampler_idx,
+			light_dir         = glsl.normalize(light_dir),
+			light_color       = light_color,
+			light_intensity   = light_intensity,
+			ambient_color     = ambient_color,
+			ambient_intensity = ambient_intensity,
+			ssao_radius       = ssao_radius,
+			ssao_pow          = ssao_pow,
 		}
 		frame_data_buffer := &frame_data_buffers[handle.buffer_idx]
 		mem.copy(frame_data_mapped[handle.buffer_idx], &frame_data, size_of(Frame_Data))

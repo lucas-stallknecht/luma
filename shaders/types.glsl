@@ -27,6 +27,8 @@ struct FrameData {
     vec3 light_color;
     float light_intensity;
     vec3 ambient_color;
+    float ssao_radius;
+    float ssao_pow;
 };
 
 layout(buffer_reference, std430) readonly buffer FrameDataBuffer {
