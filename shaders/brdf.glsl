@@ -43,7 +43,7 @@ vec3 evaluate_specular(vec3 f0, float f90, float n_dot_v, float n_dot_l, float n
     float vis = v_smith_GGX_correlated(n_dot_l, n_dot_v, roughness);
     float d = d_GGX(n_dot_h, roughness);
 
-    return d * f * vis / PI;
+    return d * f * vis;
 }
 
 vec3 evaluate_disney_diffuse(float n_dot_v, float n_dot_l, float l_dot_h, float linear_roughness) {
@@ -86,9 +86,9 @@ vec3 evaluate_BRDF(Surface surface, vec3 v, vec3 l) {
         );
 
     // metals have no diffuse part, only the dielectric part scatters
-    vec3 diffuse = fd * surface.albedo * (1.0 - surface.metallic) / PI;
+    vec3 diffuse = fd * surface.albedo * (1.0 - surface.metallic);
 
-    return (diffuse + fs) * n_dot_l;
+    return (diffuse + fs) * n_dot_l / PI;
 }
 
 #endif

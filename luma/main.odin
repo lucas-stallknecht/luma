@@ -110,7 +110,7 @@ main :: proc() {
 		&pipeline_manager,
 		{
 			name = "shading",
-			shader = "shading.comp",
+			shader = "shading.glsl",
 			push_constant_size = size_of(Shading_Push),
 			uses_rt = true,
 		},

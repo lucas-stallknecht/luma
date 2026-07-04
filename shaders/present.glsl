@@ -24,10 +24,33 @@ layout(push_constant) uniform PushConstants {
 
 layout(location = 0) out vec4 frag_color;
 
+// https://github.com/KhronosGroup/ToneMapping/blob/main/PBR_Neutral/pbrNeutral.glsl
+// Input color is non-negative and resides in the Linear Rec. 709 color space.
+// Output color is also Linear Rec. 709, but in the [0, 1] range.
+vec3 pbr_neutral_tonemapping(vec3 color) {
+    const float startCompression = 0.8 - 0.04;
+    const float desaturation = 0.15;
+
+    float x = min(color.r, min(color.g, color.b));
+    float offset = x < 0.08 ? x - 6.25 * x * x : 0.04;
+    color -= offset;
+
+    float peak = max(color.r, max(color.g, color.b));
+    if (peak < startCompression) return color;
+
+    const float d = 1. - startCompression;
+    float newPeak = 1. - d * d / (peak + d - startCompression);
+    color *= newPeak / peak;
+
+    float g = 1. - 1. / (desaturation * (peak - newPeak) + 1.);
+    return mix(color, newPeak * vec3(1, 1, 1), g);
+}
+
 void frag_main() {
     ivec2 coord = ivec2(gl_FragCoord.xy);
     vec4 hdr_color = imageLoad(F32(push.draw_image), coord);
-    vec3 final_color = pow(hdr_color.rgb, vec3(1.0 / 2.2));
+    vec3 linear_color = pow(hdr_color.rgb, vec3(1.0 / 2.2));
+    vec3 final_color = pbr_neutral_tonemapping(linear_color);
 
     frag_color = vec4(final_color, 1.0);
 }
