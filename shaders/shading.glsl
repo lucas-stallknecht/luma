@@ -10,6 +10,17 @@
 #define NORMAL_BIAS 0.001
 #define SSAO_N_SAMPLES 4
 
+#define DEBUG_VIEW_NONE 0
+#define DEBUG_VIEW_ALBEDO 1
+#define DEBUG_VIEW_NORMAL 2
+#define DEBUG_VIEW_UV 3
+#define DEBUG_VIEW_METALLIC 4
+#define DEBUG_VIEW_ROUGHNESS 5
+#define DEBUG_VIEW_AO 6
+#define DEBUG_VIEW_SHADOW 7
+
+#define DEBUG_VIEW DEBUG_VIEW_NONE
+
 layout(binding = 0, set = 1) uniform accelerationStructureEXT tlas;
 
 layout(push_constant) uniform PushConstants {
@@ -179,6 +190,27 @@ void main() {
     }
     float ao = acc / float(SSAO_N_SAMPLES);
     ao = pow(ao, frame_data.ssao_pow);
+
+    #if DEBUG_VIEW != DEBUG_VIEW_NONE
+    vec3 debug_color;
+    #if DEBUG_VIEW == DEBUG_VIEW_ALBEDO
+    debug_color = surface.albedo;
+    #elif DEBUG_VIEW == DEBUG_VIEW_NORMAL
+    debug_color = surface.normal * 0.5 + 0.5;
+    #elif DEBUG_VIEW == DEBUG_VIEW_UV
+    debug_color = vec3(uv, 0.0);
+    #elif DEBUG_VIEW == DEBUG_VIEW_METALLIC
+    debug_color = vec3(surface.metallic);
+    #elif DEBUG_VIEW == DEBUG_VIEW_ROUGHNESS
+    debug_color = vec3(surface.roughness);
+    #elif DEBUG_VIEW == DEBUG_VIEW_AO
+    debug_color = vec3(ao);
+    #elif DEBUG_VIEW == DEBUG_VIEW_SHADOW
+    debug_color = vec3(shadow);
+    #endif
+    imageStore(F32(push.draw_image), coord, vec4(debug_color, 1.0));
+    return;
+    #endif
 
     vec3 view_dir = normalize(camera_position - world_pos);
 
