@@ -12,7 +12,7 @@ MAX_SAMPLERS :: 5
 BINDLESS_SAMPLER_BINDING :: 0
 BINDLESS_TEXTURE_BINDING :: 1
 BINDLESS_STORAGE_U32_BINDING :: 2
-BINDLESS_STORAGE_HDR_BINDING :: 3
+BINDLESS_STORAGE_F32_BINDING :: 3
 BINDLESS_STORAGE_RGBA8_BINDING :: 4
 
 bindless_init :: proc(d: ^Device) {
@@ -57,7 +57,7 @@ bindless_init :: proc(d: ^Device) {
 			stageFlags = stage_flags,
 		},
 		{
-			binding = BINDLESS_STORAGE_HDR_BINDING,
+			binding = BINDLESS_STORAGE_F32_BINDING,
 			descriptorType = .STORAGE_IMAGE,
 			descriptorCount = MAX_BINDLESS_IMAGES,
 			stageFlags = stage_flags,
@@ -166,9 +166,9 @@ storage_image_binding_and_slot :: proc(
 		slot = d.bindless_next.storage_u32
 		d.bindless_next.storage_u32 += 1
 	case .R32G32B32A32_SFLOAT:
-		binding = BINDLESS_STORAGE_HDR_BINDING
-		slot = d.bindless_next.storage_hdr
-		d.bindless_next.storage_hdr += 1
+		binding = BINDLESS_STORAGE_F32_BINDING
+		slot = d.bindless_next.storage_f32
+		d.bindless_next.storage_f32 += 1
 	case .R8G8B8A8_UNORM:
 		binding = BINDLESS_STORAGE_RGBA8_BINDING
 		slot = d.bindless_next.storage_rgba8

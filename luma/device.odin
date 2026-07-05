@@ -36,7 +36,7 @@ Device :: struct {
 		sampler:       u32,
 		texture:       u32,
 		storage_u32:   u32,
-		storage_hdr:   u32,
+		storage_f32:   u32,
 		storage_rgba8: u32,
 	},
 }
@@ -186,6 +186,7 @@ device_init :: proc(d: ^Device, desc: Device_Desc) {
 			vk.KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME,
 			vk.KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME,
 			vk.KHR_RAY_QUERY_EXTENSION_NAME,
+			vk.EXT_DYNAMIC_RENDERING_UNUSED_ATTACHMENTS_EXTENSION_NAME,
 		}
 		vk11_features := vk.PhysicalDeviceVulkan11Features {
 			sType                = .PHYSICAL_DEVICE_VULKAN_1_1_FEATURES,
@@ -205,43 +206,49 @@ device_init :: proc(d: ^Device, desc: Device_Desc) {
 			descriptorBindingStorageImageUpdateAfterBind = true,
 			scalarBlockLayout                            = true,
 		}
+		unused_attachments_features :=
+			vk.PhysicalDeviceDynamicRenderingUnusedAttachmentsFeaturesEXT {
+				sType                             = .PHYSICAL_DEVICE_DYNAMIC_RENDERING_UNUSED_ATTACHMENTS_FEATURES_EXT,
+				pNext                             = &vk12_features,
+				dynamicRenderingUnusedAttachments = true,
+			}
 		vk13_features := vk.PhysicalDeviceVulkan13Features {
-			sType                          = .PHYSICAL_DEVICE_VULKAN_1_3_FEATURES,
-			pNext                          = &vk12_features,
-			synchronization2               = true,
-			dynamicRendering               = true,
-			shaderDemoteToHelperInvocation = true,
-		}
+				sType                          = .PHYSICAL_DEVICE_VULKAN_1_3_FEATURES,
+				pNext                          = &unused_attachments_features,
+				synchronization2               = true,
+				dynamicRendering               = true,
+				shaderDemoteToHelperInvocation = true,
+			}
 		vk10_features := vk.PhysicalDeviceFeatures {
-			samplerAnisotropy        = true,
-			geometryShader           = true,
-			multiDrawIndirect        = true,
-			fragmentStoresAndAtomics = true,
-		}
+				samplerAnisotropy        = true,
+				geometryShader           = true,
+				multiDrawIndirect        = true,
+				fragmentStoresAndAtomics = true,
+			}
 		accel_features := vk.PhysicalDeviceAccelerationStructureFeaturesKHR {
-			sType                 = .PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR,
-			pNext                 = &vk13_features,
-			accelerationStructure = true,
-		}
+				sType                 = .PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR,
+				pNext                 = &vk13_features,
+				accelerationStructure = true,
+			}
 		ray_query_features := vk.PhysicalDeviceRayQueryFeaturesKHR {
-			sType    = .PHYSICAL_DEVICE_RAY_QUERY_FEATURES_KHR,
-			pNext    = &accel_features,
-			rayQuery = true,
-		}
+				sType    = .PHYSICAL_DEVICE_RAY_QUERY_FEATURES_KHR,
+				pNext    = &accel_features,
+				rayQuery = true,
+			}
 		rt_pipeline_features := vk.PhysicalDeviceRayTracingPipelineFeaturesKHR {
-			sType = .PHYSICAL_DEVICE_RAY_TRACING_PIPELINE_FEATURES_KHR,
-			pNext = &ray_query_features,
-		}
+				sType = .PHYSICAL_DEVICE_RAY_TRACING_PIPELINE_FEATURES_KHR,
+				pNext = &ray_query_features,
+			}
 
 		device_ci := vk.DeviceCreateInfo {
-			sType                   = .DEVICE_CREATE_INFO,
-			pNext                   = &rt_pipeline_features,
-			queueCreateInfoCount    = u32(num_queues),
-			pQueueCreateInfos       = raw_data(&queue_ci),
-			enabledExtensionCount   = u32(len(device_extensions)),
-			ppEnabledExtensionNames = raw_data(&device_extensions),
-			pEnabledFeatures        = &vk10_features,
-		}
+				sType                   = .DEVICE_CREATE_INFO,
+				pNext                   = &rt_pipeline_features,
+				queueCreateInfoCount    = u32(num_queues),
+				pQueueCreateInfos       = raw_data(&queue_ci),
+				enabledExtensionCount   = u32(len(device_extensions)),
+				ppEnabledExtensionNames = raw_data(&device_extensions),
+				pEnabledFeatures        = &vk10_features,
+			}
 		chk(vk.CreateDevice(d.physical_device, &device_ci, nil, &d.device))
 		vk.load_proc_addresses_device(d.device)
 		if vk.BeginCommandBuffer == nil do fmt.panicf("[Device] Failed to load device functions")

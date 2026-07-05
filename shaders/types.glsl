@@ -23,11 +23,16 @@ struct FrameData {
     vec3 camera_position;
     uint texture_sampler;
     vec3 light_dir;
-    float ambient_intensity;
+    float albedo_boost;
     vec3 light_color;
     float light_intensity;
-    vec3 ambient_color;
+    vec3 sky_color;
     float ssao_radius;
+    vec3 grid_min;
+    uint probe_count;
+    vec3 grid_spacing;
+    uint frame_idx;
+    ivec3 probe_counts;
     float ssao_pow;
 };
 

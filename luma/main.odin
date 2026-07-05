@@ -94,6 +94,29 @@ main :: proc() {
 		},
 	)
 
+	Probe_Debug_Push :: struct {
+		frame_data:            vk.DeviceAddress,
+		vertex_buffer:         vk.DeviceAddress,
+		normal_buffer:         vk.DeviceAddress,
+		probe_position_buffer: vk.DeviceAddress,
+		probe_sh_buffer:       vk.DeviceAddress,
+	}
+	probe_debug_pipeline := pipeline_manager_add_raster(
+		&pipeline_manager,
+		{
+			name = "probe_debug",
+			shader = "probe_debug.glsl",
+			raster = {primitive_topology = .TRIANGLE_LIST, front_face = .CLOCKWISE},
+			push_constant_size = size_of(Probe_Debug_Push),
+			color_attachments = {{format = swapchain.format}},
+			depth_test = Depth_Test {
+				enable_depth_write = true,
+				compare_op = .LESS_OR_EQUAL,
+				format = .D32_SFLOAT,
+			},
+		},
+	)
+
 	Shading_Push :: struct {
 		frame_data:       vk.DeviceAddress,
 		visbuffer:        u32,
@@ -105,6 +128,7 @@ main :: proc() {
 		tangent_buffer:   vk.DeviceAddress,
 		uv_buffer:        vk.DeviceAddress,
 		material_buffer:  vk.DeviceAddress,
+		probe_sh_buffer:  vk.DeviceAddress,
 	}
 	shading_pipeline := pipeline_manager_add_compute(
 		&pipeline_manager,
@@ -112,6 +136,26 @@ main :: proc() {
 			name = "shading",
 			shader = "shading.glsl",
 			push_constant_size = size_of(Shading_Push),
+			uses_rt = true,
+		},
+	)
+
+	Probe_Bake_Push :: struct {
+		frame_data:            vk.DeviceAddress,
+		index_buffer:          vk.DeviceAddress,
+		normal_buffer:         vk.DeviceAddress,
+		uv_buffer:             vk.DeviceAddress,
+		draw_data_buffer:      vk.DeviceAddress,
+		material_buffer:       vk.DeviceAddress,
+		probe_position_buffer: vk.DeviceAddress,
+		probe_sh_buffer:       vk.DeviceAddress,
+	}
+	probe_bake_pipeline := pipeline_manager_add_compute(
+		&pipeline_manager,
+		{
+			name = "probe_bake",
+			shader = "probe_bake.glsl",
+			push_constant_size = size_of(Probe_Bake_Push),
 			uses_rt = true,
 		},
 	)
@@ -143,6 +187,19 @@ main :: proc() {
 	scene: Scene
 	scene_init(&scene, &device, "assets/crytek_sponza/scene.bin")
 	defer scene_cleanup(&scene, &device)
+
+	gi: Gi_System
+	gi_system_init(
+		&gi,
+		&device,
+		"assets/sphere.bin",
+		{
+			probe_counts = {24, 6, 10},
+			grid_min= {-11.5, 0.2, -5.4},
+			grid_max = {10.5, 10.0, 5.0},
+		}
+	)
+	defer gi_system_cleanup(&gi, &device)
 
 	visbuffer := create_image(
 		&device,
@@ -193,25 +250,31 @@ main :: proc() {
 	texture_sampler_idx := bindless_register_sampler(&device, texture_sampler)
 
 	Frame_Data :: struct {
-		proj_view:         glsl.mat4,
-		inv_proj_view:     glsl.mat4,
-		camera_position:   glsl.vec3,
-		texture_sampler:   u32,
-		light_dir:         glsl.vec3,
-		ambient_intensity: f32,
-		light_color:       glsl.vec3,
-		light_intensity:   f32,
-		ambient_color:     glsl.vec3,
-		ssao_radius:       f32,
-		ssao_pow:          f32,
+		proj_view:          glsl.mat4,
+		inv_proj_view:      glsl.mat4,
+		camera_position:    glsl.vec3,
+		texture_sampler:    u32,
+		light_dir:          glsl.vec3,
+		albedo_boost:       f32,
+		light_color:        glsl.vec3,
+		light_intensity:    f32,
+		sky_color:          glsl.vec3,
+		ssao_radius:        f32,
+		grid_min:           glsl.vec3,
+		probe_count:        u32,
+		grid_spacing:       glsl.vec3,
+		frame_idx:          u32,
+		probe_counts:       [3]u32,
+		ssao_pow:           f32,
 	}
 	light_dir := glsl.vec3{0.1, 1.0, -0.1}
 	light_color := glsl.vec3{1.0, 1.0, 1.0}
 	light_intensity: f32 = 4.0
-	ambient_color := glsl.vec3{1.0, 1.0, 1.0}
-	ambient_intensity: f32 = 0.1
+	albedo_boost: f32 = 1.4
+	sky_color := glsl.vec3{0.5, 0.7, 1.0}
 	ssao_radius: f32 = 0.3
-	ssao_pow: f32 = 2.0
+	ssao_pow: f32 = 1.0
+	show_probes := false
 
 	// one buffer per in-flight command buffer slot, so the CPU never overwrites frame
 	// data the GPU hasn't finished reading yet
@@ -249,14 +312,23 @@ main :: proc() {
 		}
 	}
 
+	BAKE_INTERVAL :: 1.0 / 30.0
+
 	last_frame_time: f64 = glfw.GetTime()
 	reload_key_prev: bool = false
+	bake_accum: f32 = BAKE_INTERVAL
 
 	for !window_should_close(&window) {
 		window_update(&window)
 		time := glfw.GetTime()
 		dt := f32(time - last_frame_time)
 		last_frame_time = time
+
+		bake_accum += dt
+		do_bake := bake_accum >= BAKE_INTERVAL
+		if do_bake {
+			bake_accum -= BAKE_INTERVAL
+		}
 
 		handle_camera_inputs(&window, &camera, dt)
 		if window.pressed_keys[glfw.KEY_R] && !reload_key_prev {
@@ -277,7 +349,7 @@ main :: proc() {
 
 		// ui
 		mu.begin(&ui.ctx)
-		if mu.window(&ui.ctx, "Debug", {x = 20, y = 20, w = 260, h = 400}) {
+		if mu.window(&ui.ctx, "Debug", {x = 20, y = 20, w = 320, h = 640}) {
 			fps := 1.0 / dt if dt > 0 else 0
 			mu.layout_row(&ui.ctx, {-1}, 0)
 			mu.label(&ui.ctx, fmt.tprintf("%.2f ms (%.0f fps)", dt * 1000, fps))
@@ -309,21 +381,17 @@ main :: proc() {
 			mu.slider(&ui.ctx, &light_intensity, 0, 10)
 
 			mu.layout_row(&ui.ctx, {-1}, 0)
-			mu.label(&ui.ctx, "Ambient color")
-			mu.layout_row(&ui.ctx, {-(SWATCH_WIDTH + SWATCH_GAP)}, 0)
-			ambient_color_top := ui_layout_cursor_y(&ui.ctx)
-			mu.slider(&ui.ctx, &ambient_color.x, 0, 1)
-			mu.slider(&ui.ctx, &ambient_color.y, 0, 1)
-			mu.slider(&ui.ctx, &ambient_color.z, 0, 1)
-			ui_color_rect(
-				&ui.ctx,
-				ui_swatch_rect(&ui.ctx, ambient_color_top, SWATCH_WIDTH),
-				ambient_color,
-			)
+			mu.label(&ui.ctx, "Albedo boost")
+			mu.slider(&ui.ctx, &albedo_boost, 1, 4)
 
 			mu.layout_row(&ui.ctx, {-1}, 0)
-			mu.label(&ui.ctx, "Ambient intensity")
-			mu.slider(&ui.ctx, &ambient_intensity, 0, 1)
+			mu.label(&ui.ctx, "Sky color")
+			mu.layout_row(&ui.ctx, {-(SWATCH_WIDTH + SWATCH_GAP)}, 0)
+			sky_color_top := ui_layout_cursor_y(&ui.ctx)
+			mu.slider(&ui.ctx, &sky_color.x, 0, 1)
+			mu.slider(&ui.ctx, &sky_color.y, 0, 1)
+			mu.slider(&ui.ctx, &sky_color.z, 0, 1)
+			ui_color_rect(&ui.ctx, ui_swatch_rect(&ui.ctx, sky_color_top, SWATCH_WIDTH), sky_color)
 
 			mu.layout_row(&ui.ctx, {-1}, 0)
 			mu.label(&ui.ctx, "SSAO radius")
@@ -332,6 +400,9 @@ main :: proc() {
 			mu.layout_row(&ui.ctx, {-1}, 0)
 			mu.label(&ui.ctx, "SSAO power")
 			mu.slider(&ui.ctx, &ssao_pow, 0.1, 8)
+
+			mu.layout_row(&ui.ctx, {-1}, 0)
+			mu.checkbox(&ui.ctx, "Show probes", &show_probes)
 		}
 		mu.end(&ui.ctx)
 
@@ -341,20 +412,71 @@ main :: proc() {
 
 		proj_view := camera.proj * camera_get_view(&camera)
 		frame_data := Frame_Data {
-			proj_view         = proj_view,
-			inv_proj_view     = glsl.inverse(proj_view),
-			camera_position   = camera.position,
-			texture_sampler   = texture_sampler_idx,
-			light_dir         = glsl.normalize(light_dir),
-			light_color       = light_color,
-			light_intensity   = light_intensity,
-			ambient_color     = ambient_color,
-			ambient_intensity = ambient_intensity,
-			ssao_radius       = ssao_radius,
-			ssao_pow          = ssao_pow,
+			proj_view          = proj_view,
+			inv_proj_view      = glsl.inverse(proj_view),
+			camera_position    = camera.position,
+			texture_sampler    = texture_sampler_idx,
+			light_dir          = glsl.normalize(light_dir),
+			light_color        = light_color,
+			light_intensity    = light_intensity,
+			albedo_boost       = albedo_boost,
+			ssao_radius        = ssao_radius,
+			sky_color          = sky_color,
+			ssao_pow           = ssao_pow,
+			grid_min           = gi.info.grid_min,
+			probe_count        = gi.probe_count,
+			grid_spacing       = gi.grid_spacing,
+			probe_counts       = gi.info.probe_counts,
 		}
 		frame_data_buffer := &frame_data_buffers[handle.buffer_idx]
 		mem.copy(frame_data_mapped[handle.buffer_idx], &frame_data, size_of(Frame_Data))
+
+		// re-bake probes every BAKE_INTERVAL rather than every frame
+		if do_bake {
+			buffer_barriers(
+				cb,
+				{
+					buffer = &gi.probe_sh_buffer,
+					src_stage = {.COMPUTE_SHADER, .FRAGMENT_SHADER},
+					src_access = {.SHADER_STORAGE_READ, .SHADER_STORAGE_WRITE},
+					dst_stage = {.COMPUTE_SHADER},
+					dst_access = {.SHADER_STORAGE_READ, .SHADER_STORAGE_WRITE},
+				},
+			)
+
+			bake_pc := Probe_Bake_Push {
+				frame_data            = frame_data_buffer.device_address,
+				index_buffer          = scene.index_buffer.device_address,
+				normal_buffer         = scene.normal_buffer.device_address,
+				uv_buffer             = scene.uv_buffer.device_address,
+				draw_data_buffer      = scene.draw_data_buffer.device_address,
+				material_buffer       = scene.material_buffer.device_address,
+				probe_position_buffer = gi.probe_position_buffer.device_address,
+				probe_sh_buffer       = gi.probe_sh_buffer.device_address,
+			}
+			vk.CmdPushConstants(
+				cb,
+				probe_bake_pipeline.layout,
+				{.COMPUTE},
+				0,
+				size_of(Probe_Bake_Push),
+				&bake_pc,
+			)
+			bind_compute_pipeline(cb, probe_bake_pipeline)
+			vk.CmdDispatch(cb, 1, gi.probe_count, 1)
+
+			// the fresh SH field is read by the shading compute pass and by the probe debug fragment shader below
+			buffer_barriers(
+				cb,
+				{
+					buffer = &gi.probe_sh_buffer,
+					src_stage = {.COMPUTE_SHADER},
+					src_access = {.SHADER_STORAGE_WRITE},
+					dst_stage = {.COMPUTE_SHADER, .FRAGMENT_SHADER},
+					dst_access = {.SHADER_STORAGE_READ},
+				},
+			)
+		}
 
 		image_barriers(
 			cb,
@@ -465,6 +587,7 @@ main :: proc() {
 			tangent_buffer   = scene.tangent_buffer.device_address,
 			uv_buffer        = scene.uv_buffer.device_address,
 			material_buffer  = scene.material_buffer.device_address,
+			probe_sh_buffer  = gi.probe_sh_buffer.device_address,
 		}
 		vk.CmdPushConstants(
 			cb,
@@ -486,9 +609,16 @@ main :: proc() {
 				dst_stage = {.FRAGMENT_SHADER},
 				dst_access = {.SHADER_STORAGE_READ},
 			},
+			{
+				image = &depth_image,
+				src_stage = {.LATE_FRAGMENT_TESTS},
+				src_access = {.DEPTH_STENCIL_ATTACHMENT_WRITE},
+				dst_stage = {.EARLY_FRAGMENT_TESTS, .LATE_FRAGMENT_TESTS},
+				dst_access = {.DEPTH_STENCIL_ATTACHMENT_READ, .DEPTH_STENCIL_ATTACHMENT_WRITE},
+			},
 		)
 
-		// render a fullscreen triangle that samples the visbuffer
+		// render a fullscreen triangle that samples the draw image and apply tonemapping
 		swap_color_attachments := vk.RenderingAttachmentInfo {
 			sType = .RENDERING_ATTACHMENT_INFO,
 			imageView = swapchain_image.view,
@@ -497,12 +627,22 @@ main :: proc() {
 			storeOp = .STORE,
 			clearValue = {color = vk.ClearColorValue{float32 = [4]f32{0.0, 0.0, 0.0, 0.0}}},
 		}
+		// reuse the visbuffer pass' depth so probes are occluded by real geometry
+		// present/ui don't use it, relying on VK_EXT_dynamic_rendering_unused_attachments
+		swap_depth_attachment := vk.RenderingAttachmentInfo {
+			sType       = .RENDERING_ATTACHMENT_INFO,
+			imageView   = depth_image.view,
+			imageLayout = .GENERAL,
+			loadOp      = .LOAD,
+			storeOp     = .DONT_CARE,
+		}
 		rendering_info2 := vk.RenderingInfo {
 			sType                = .RENDERING_INFO,
 			renderArea           = render_area,
 			layerCount           = 1,
 			colorAttachmentCount = 1,
 			pColorAttachments    = &swap_color_attachments,
+			pDepthAttachment     = &swap_depth_attachment,
 		}
 		vk.CmdBeginRendering(cb, &rendering_info2)
 		vk.CmdSetViewportWithCount(cb, 1, &vp)
@@ -521,6 +661,27 @@ main :: proc() {
 		)
 		bind_raster_pipeline(cb, present_pipeline)
 		vk.CmdDraw(cb, 3, 1, 0, 0)
+
+		if show_probes {
+			// probes debug: draw directly on the swapchain
+			probe_debug_pc := Probe_Debug_Push {
+				frame_data            = frame_data_buffer.device_address,
+				vertex_buffer         = gi.debug_sphere_vertex_buffer.device_address,
+				normal_buffer         = gi.debug_sphere_normal_buffer.device_address,
+				probe_position_buffer = gi.probe_position_buffer.device_address,
+				probe_sh_buffer       = gi.probe_sh_buffer.device_address,
+			}
+			vk.CmdPushConstants(
+				cb,
+				probe_debug_pipeline.layout,
+				{.VERTEX, .FRAGMENT},
+				0,
+				size_of(Probe_Debug_Push),
+				&probe_debug_pc,
+			)
+			bind_raster_pipeline(cb, probe_debug_pipeline)
+			vk.CmdDraw(cb, gi.debug_sphere_vertex_count, gi.probe_count, 0, 0)
+		}
 
 		ui_render(ui, cb, handle.buffer_idx, width, height)
 

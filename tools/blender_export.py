@@ -169,10 +169,9 @@ for obj_idx, obj in enumerate(bpy.context.selected_objects):
     print("Processing:", obj.name)
 
     mesh = cast(bpy.types.Mesh, obj.data)
-    if not mesh.uv_layers.active:
-        continue
-    uv_layer = mesh.uv_layers.active.data if mesh.uv_layers else None
-    mesh.calc_tangents()
+    uv_layer = mesh.uv_layers.active.data if mesh.uv_layers.active else None
+    if uv_layer:
+        mesh.calc_tangents()
 
     # object transform
     # transform = np.array(obj.matrix_world, dtype=np.float32)
@@ -211,7 +210,11 @@ for obj_idx, obj in enumerate(bpy.context.selected_objects):
                     if mesh.has_custom_normals
                     else mesh.vertices[v_idx].normal
                 )
-                tangents.append(Vector((*loop.tangent, loop.bitangent_sign)))
+                tangents.append(
+                    Vector((*loop.tangent, loop.bitangent_sign))
+                    if uv_layer
+                    else Vector((1.0, 0.0, 0.0, 1.0))
+                )
 
                 if uv_layer:
                     uvs.append(uv_layer[loop_idx].uv.copy())
