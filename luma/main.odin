@@ -140,6 +140,42 @@ main :: proc() {
 		},
 	)
 
+	Bloom_Downsample_Push :: struct {
+		src_texture: u32,
+		src_sampler: u32,
+		src_lod:     f32,
+		dst_image:   u32,
+		dst_width:   u32,
+		dst_height:  u32,
+	}
+	bloom_downsample_pipeline := pipeline_manager_add_compute(
+		&pipeline_manager,
+		{
+			name = "bloom_downsample",
+			shader = "bloom_downsample.glsl",
+			push_constant_size = size_of(Bloom_Downsample_Push),
+		},
+	)
+
+	Bloom_Upsample_Push :: struct {
+		src_texture:   u32,
+		src_sampler:   u32,
+		src_lod:       f32, // coarser mip to tent-sample
+		dst_lod:       f32, // this mip, to fetch the already-downsampled base value
+		dst_image:     u32,
+		dst_width:     u32,
+		dst_height:    u32,
+		filter_radius: f32,
+	}
+	bloom_upsample_pipeline := pipeline_manager_add_compute(
+		&pipeline_manager,
+		{
+			name = "bloom_upsample",
+			shader = "bloom_upsample.glsl",
+			push_constant_size = size_of(Bloom_Upsample_Push),
+		},
+	)
+
 	Probe_Bake_Push :: struct {
 		frame_data:            vk.DeviceAddress,
 		index_buffer:          vk.DeviceAddress,
@@ -161,7 +197,10 @@ main :: proc() {
 	)
 
 	Present_Push :: struct {
-		draw_image: u32,
+		draw_image:      u32,
+		bloom_texture:   u32,
+		bloom_sampler:   u32,
+		bloom_intensity: f32,
 	}
 	present_pipeline := pipeline_manager_add_raster(
 		&pipeline_manager,
@@ -218,11 +257,13 @@ main :: proc() {
 			width = window.width,
 			height = window.height,
 			format = .R32G32B32A32_SFLOAT,
-			usage = {.TRANSFER_SRC, .STORAGE},
+			usage = {.TRANSFER_SRC, .STORAGE, .SAMPLED},
 			memory = .GPU_ONLY,
 			register_bindless = .Storage,
 		},
 	)
+	draw_image_tex_idx := bindless_register_texture(&device, draw_image.view)
+
 	depth_image := create_image(
 		&device,
 		{
@@ -233,6 +274,37 @@ main :: proc() {
 			memory = .GPU_ONLY,
 		},
 	)
+
+	// physically based bloom (https://learnopengl.com/Guest-Articles/2022/Phys.-Based-Bloom)
+	// mip 0 = half screen res
+	BLOOM_MIP_COUNT :: 4
+	bloom_base_width := max(window.width / 2, 1)
+	bloom_base_height := max(window.height / 2, 1)
+	bloom_image := create_image(
+		&device,
+		{
+			width = bloom_base_width,
+			height = bloom_base_height,
+			format = .R32G32B32A32_SFLOAT,
+			usage = {.SAMPLED, .TRANSFER_DST},
+			memory = .GPU_ONLY,
+			register_bindless = .Texture,
+			mips = true,
+		},
+	)
+	bloom_mip_count := min(bloom_image.mip_levels, BLOOM_MIP_COUNT)
+	bloom_scratch := create_image(
+		&device,
+		{
+			width = bloom_base_width,
+			height = bloom_base_height,
+			format = .R32G32B32A32_SFLOAT,
+			usage = {.STORAGE, .TRANSFER_SRC},
+			memory = .GPU_ONLY,
+			register_bindless = .Storage,
+		},
+	)
+
 	texture_sampler: vk.Sampler
 	texture_sampler_ci := vk.SamplerCreateInfo {
 		sType        = .SAMPLER_CREATE_INFO,
@@ -248,6 +320,21 @@ main :: proc() {
 	}
 	chk(vk.CreateSampler(device.device, &texture_sampler_ci, nil, &texture_sampler))
 	texture_sampler_idx := bindless_register_sampler(&device, texture_sampler)
+
+	bloom_sampler: vk.Sampler
+	bloom_sampler_ci := vk.SamplerCreateInfo {
+		sType        = .SAMPLER_CREATE_INFO,
+		magFilter    = .LINEAR,
+		minFilter    = .LINEAR,
+		addressModeU = .CLAMP_TO_EDGE,
+		addressModeV = .CLAMP_TO_EDGE,
+		addressModeW = .CLAMP_TO_EDGE,
+		minLod       = 0.0,
+		maxLod       = vk.LOD_CLAMP_NONE,
+		borderColor  = .INT_OPAQUE_BLACK,
+	}
+	chk(vk.CreateSampler(device.device, &bloom_sampler_ci, nil, &bloom_sampler))
+	bloom_sampler_idx := bindless_register_sampler(&device, bloom_sampler)
 
 	Frame_Data :: struct {
 		proj_view:          glsl.mat4,
@@ -269,12 +356,14 @@ main :: proc() {
 	}
 	light_dir := glsl.vec3{0.1, 1.0, -0.1}
 	light_color := glsl.vec3{1.0, 1.0, 1.0}
-	light_intensity: f32 = 4.0
+	light_intensity: f32 = 12.0
 	albedo_boost: f32 = 1.4
 	sky_color := glsl.vec3{0.5, 0.7, 1.0}
 	ssao_radius: f32 = 0.3
 	ssao_pow: f32 = 1.0
 	show_probes := false
+	bloom_intensity: f32 = 0.04
+	bloom_filter_radius: f32 = 0.001
 
 	// one buffer per in-flight command buffer slot, so the CPU never overwrites frame
 	// data the GPU hasn't finished reading yet
@@ -303,9 +392,14 @@ main :: proc() {
 		if texture_sampler != 0 {
 			vk.DestroySampler(device.device, texture_sampler, nil)
 		}
+		if bloom_sampler != 0 {
+			vk.DestroySampler(device.device, bloom_sampler, nil)
+		}
 		destroy_image(&device, visbuffer)
 		destroy_image(&device, draw_image)
 		destroy_image(&device, depth_image)
+		destroy_image(&device, bloom_image)
+		destroy_image(&device, bloom_scratch)
 		for i in 0 ..< int(MAX_COMMAND_BUFFERS) {
 			vk.UnmapMemory(device.device, frame_data_buffers[i].memory)
 			destroy_buffer(&device, &frame_data_buffers[i])
@@ -349,7 +443,7 @@ main :: proc() {
 
 		// ui
 		mu.begin(&ui.ctx)
-		if mu.window(&ui.ctx, "Debug", {x = 20, y = 20, w = 320, h = 640}) {
+		if mu.window(&ui.ctx, "Debug", {x = 20, y = 20, w = 320, h = 720}) {
 			fps := 1.0 / dt if dt > 0 else 0
 			mu.layout_row(&ui.ctx, {-1}, 0)
 			mu.label(&ui.ctx, fmt.tprintf("%.2f ms (%.0f fps)", dt * 1000, fps))
@@ -378,7 +472,7 @@ main :: proc() {
 
 			mu.layout_row(&ui.ctx, {-1}, 0)
 			mu.label(&ui.ctx, "Light intensity")
-			mu.slider(&ui.ctx, &light_intensity, 0, 10)
+			mu.slider(&ui.ctx, &light_intensity, 0, 40)
 
 			mu.layout_row(&ui.ctx, {-1}, 0)
 			mu.label(&ui.ctx, "Albedo boost")
@@ -403,6 +497,14 @@ main :: proc() {
 
 			mu.layout_row(&ui.ctx, {-1}, 0)
 			mu.checkbox(&ui.ctx, "Show probes", &show_probes)
+
+			mu.layout_row(&ui.ctx, {-1}, 0)
+			mu.label(&ui.ctx, "Bloom intensity")
+			mu.slider(&ui.ctx, &bloom_intensity, 0.001, 0.2)
+
+			mu.layout_row(&ui.ctx, {-1}, 0)
+			mu.label(&ui.ctx, "Bloom filter radius")
+			mu.slider(&ui.ctx, &bloom_filter_radius, 0.001, 0.01)
 		}
 		mu.end(&ui.ctx)
 
@@ -598,7 +700,7 @@ main :: proc() {
 			&shading_pc,
 		)
 		bind_compute_pipeline(cb, shading_pipeline)
-		vk.CmdDispatch(cb, window.width / 8, window.height / 8, 1)
+		vk.CmdDispatch(cb, (window.width + 7) / 8, (window.height + 7) / 8, 1)
 
 		image_barriers(
 			cb,
@@ -606,8 +708,8 @@ main :: proc() {
 				image = &draw_image,
 				src_stage = {.COMPUTE_SHADER},
 				src_access = {.SHADER_STORAGE_WRITE},
-				dst_stage = {.FRAGMENT_SHADER},
-				dst_access = {.SHADER_STORAGE_READ},
+				dst_stage = {.COMPUTE_SHADER, .FRAGMENT_SHADER},
+				dst_access = {.SHADER_SAMPLED_READ, .SHADER_STORAGE_READ},
 			},
 			{
 				image = &depth_image,
@@ -617,6 +719,169 @@ main :: proc() {
 				dst_access = {.DEPTH_STENCIL_ATTACHMENT_READ, .DEPTH_STENCIL_ATTACHMENT_WRITE},
 			},
 		)
+
+		// physically based bloom (https://learnopengl.com/Guest-Articles/2022/Phys.-Based-Bloom)
+		bind_compute_pipeline(cb, bloom_downsample_pipeline)
+		for i in 0 ..< bloom_mip_count {
+			src_texture := draw_image_tex_idx if i == 0 else bloom_image.bindless_idx
+			src_lod := 0.0 if i == 0 else f32(i - 1)
+			w := max(bloom_base_width >> i, 1)
+			h := max(bloom_base_height >> i, 1)
+
+			image_barriers(
+				cb,
+				{
+					image = &bloom_scratch,
+					src_stage = {.TRANSFER},
+					src_access = {.TRANSFER_READ},
+					dst_stage = {.COMPUTE_SHADER},
+					dst_access = {.SHADER_STORAGE_WRITE},
+				},
+			)
+
+			downsample_pc := Bloom_Downsample_Push {
+				src_texture = src_texture,
+				src_sampler = bloom_sampler_idx,
+				src_lod     = src_lod,
+				dst_image   = bloom_scratch.bindless_idx,
+				dst_width   = w,
+				dst_height  = h,
+			}
+			vk.CmdPushConstants(
+				cb,
+				bloom_downsample_pipeline.layout,
+				{.COMPUTE},
+				0,
+				size_of(Bloom_Downsample_Push),
+				&downsample_pc,
+			)
+			vk.CmdDispatch(cb, (w + 7) / 8, (h + 7) / 8, 1)
+
+			image_barriers(
+				cb,
+				{
+					image = &bloom_scratch,
+					src_stage = {.COMPUTE_SHADER},
+					src_access = {.SHADER_STORAGE_WRITE},
+					dst_stage = {.TRANSFER},
+					dst_access = {.TRANSFER_READ},
+				},
+				{
+					image = &bloom_image,
+					src_stage = {.COMPUTE_SHADER, .FRAGMENT_SHADER},
+					src_access = {.SHADER_SAMPLED_READ},
+					dst_stage = {.TRANSFER},
+					dst_access = {.TRANSFER_WRITE},
+				},
+			)
+
+			bloom_copy_region := vk.ImageCopy {
+				srcSubresource = {aspectMask = {.COLOR}, layerCount = 1},
+				dstSubresource = {aspectMask = {.COLOR}, mipLevel = i, layerCount = 1},
+				extent = {w, h, 1},
+			}
+			vk.CmdCopyImage(
+				cb,
+				bloom_scratch.image,
+				.GENERAL,
+				bloom_image.image,
+				.GENERAL,
+				1,
+				&bloom_copy_region,
+			)
+
+			image_barriers(
+				cb,
+				{
+					image = &bloom_image,
+					src_stage = {.TRANSFER},
+					src_access = {.TRANSFER_WRITE},
+					dst_stage = {.COMPUTE_SHADER, .FRAGMENT_SHADER},
+					dst_access = {.SHADER_SAMPLED_READ},
+				},
+			)
+		}
+
+		bind_compute_pipeline(cb, bloom_upsample_pipeline)
+		for i := int(bloom_mip_count) - 2; i >= 0; i -= 1 {
+			w := max(bloom_base_width >> u32(i), 1)
+			h := max(bloom_base_height >> u32(i), 1)
+
+			image_barriers(
+				cb,
+				{
+					image = &bloom_scratch,
+					src_stage = {.TRANSFER},
+					src_access = {.TRANSFER_READ},
+					dst_stage = {.COMPUTE_SHADER},
+					dst_access = {.SHADER_STORAGE_WRITE},
+				},
+			)
+
+			upsample_pc := Bloom_Upsample_Push {
+				src_texture   = bloom_image.bindless_idx,
+				src_sampler   = bloom_sampler_idx,
+				src_lod       = f32(i + 1),
+				dst_lod       = f32(i),
+				dst_image     = bloom_scratch.bindless_idx,
+				dst_width     = w,
+				dst_height    = h,
+				filter_radius = bloom_filter_radius,
+			}
+			vk.CmdPushConstants(
+				cb,
+				bloom_upsample_pipeline.layout,
+				{.COMPUTE},
+				0,
+				size_of(Bloom_Upsample_Push),
+				&upsample_pc,
+			)
+			vk.CmdDispatch(cb, (w + 7) / 8, (h + 7) / 8, 1)
+
+			image_barriers(
+				cb,
+				{
+					image = &bloom_scratch,
+					src_stage = {.COMPUTE_SHADER},
+					src_access = {.SHADER_STORAGE_WRITE},
+					dst_stage = {.TRANSFER},
+					dst_access = {.TRANSFER_READ},
+				},
+				{
+					image = &bloom_image,
+					src_stage = {.COMPUTE_SHADER, .FRAGMENT_SHADER},
+					src_access = {.SHADER_SAMPLED_READ},
+					dst_stage = {.TRANSFER},
+					dst_access = {.TRANSFER_WRITE},
+				},
+			)
+
+			bloom_copy_region := vk.ImageCopy {
+				srcSubresource = {aspectMask = {.COLOR}, layerCount = 1},
+				dstSubresource = {aspectMask = {.COLOR}, mipLevel = u32(i), layerCount = 1},
+				extent = {w, h, 1},
+			}
+			vk.CmdCopyImage(
+				cb,
+				bloom_scratch.image,
+				.GENERAL,
+				bloom_image.image,
+				.GENERAL,
+				1,
+				&bloom_copy_region,
+			)
+
+			image_barriers(
+				cb,
+				{
+					image = &bloom_image,
+					src_stage = {.TRANSFER},
+					src_access = {.TRANSFER_WRITE},
+					dst_stage = {.COMPUTE_SHADER, .FRAGMENT_SHADER},
+					dst_access = {.SHADER_SAMPLED_READ},
+				},
+			)
+		}
 
 		// render a fullscreen triangle that samples the draw image and apply tonemapping
 		swap_color_attachments := vk.RenderingAttachmentInfo {
@@ -649,7 +914,10 @@ main :: proc() {
 		vk.CmdSetScissorWithCount(cb, 1, &scissor)
 
 		present_pc := Present_Push {
-			draw_image = draw_image.bindless_idx,
+			draw_image      = draw_image.bindless_idx,
+			bloom_texture   = bloom_image.bindless_idx,
+			bloom_sampler   = bloom_sampler_idx,
+			bloom_intensity = bloom_intensity,
 		}
 		vk.CmdPushConstants(
 			cb,

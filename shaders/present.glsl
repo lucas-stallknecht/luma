@@ -20,6 +20,9 @@ void vert_main() {
 
 layout(push_constant) uniform PushConstants {
     uint draw_image;
+    uint bloom_texture;
+    uint bloom_sampler;
+    float bloom_intensity;
 } push;
 
 layout(location = 0) out vec4 frag_color;
@@ -49,6 +52,11 @@ vec3 pbr_neutral_tonemapping(vec3 color) {
 void frag_main() {
     ivec2 coord = ivec2(gl_FragCoord.xy);
     vec4 hdr_color = imageLoad(F32(push.draw_image), coord);
+
+    vec2 uv = (vec2(coord) + 0.5) / vec2(imageSize(F32(push.draw_image)));
+    vec3 bloom_color = textureLod(TEX(push.bloom_texture, push.bloom_sampler), uv, 0.0).rgb;
+    hdr_color.rgb = mix(hdr_color.rgb, bloom_color, push.bloom_intensity);
+
     vec3 linear_color = pow(hdr_color.rgb, vec3(1.0 / 2.2));
     vec3 final_color = pbr_neutral_tonemapping(linear_color);
 
