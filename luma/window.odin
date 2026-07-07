@@ -31,7 +31,7 @@ window_bind_ui :: proc(win: ^Window, ctx: ^mu.Context) {
 	win.ui_ctx = ctx
 }
 
-window_init :: proc(win: ^Window, width: u32 = 1600, height: u32 = 900) -> bool {
+window_init :: proc(win: ^Window, width: u32 = 1920, height: u32 = 960) -> bool {
 	win.width = width
 	win.height = height
 	win.mouse_state = .Not_Captured

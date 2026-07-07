@@ -485,7 +485,7 @@ main :: proc() {
 
 		// ui
 		mu.begin(&ui.ctx)
-		if mu.window(&ui.ctx, "Debug", {x = 20, y = 20, w = 320, h = 720}) {
+		if mu.window(&ui.ctx, "Debug", {x = 20, y = 20, w = 320, h = 800}) {
 			fps := 1.0 / dt if dt > 0 else 0
 			mu.layout_row(&ui.ctx, {-1}, 0)
 			mu.label(&ui.ctx, fmt.tprintf("%.2f ms (%.0f fps)", dt * 1000, fps))

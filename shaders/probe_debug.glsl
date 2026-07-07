@@ -15,7 +15,7 @@ layout(push_constant) uniform PushConstants
 
 #ifdef STAGE_VERTEX
 
-#define SPHERE_SIZE 0.05
+#define SPHERE_SIZE 0.10
 
 layout(location = 0) out vec3 normal;
 layout(location = 1) out flat uint probe_idx;

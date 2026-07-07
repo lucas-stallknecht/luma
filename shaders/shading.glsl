@@ -21,6 +21,7 @@
 #define DEBUG_VIEW_AO 6
 #define DEBUG_VIEW_SHADOW 7
 #define DEBUG_VIEW_GI 8
+#define DEBUG_VIEW_VIS 9
 
 #define DEBUG_VIEW DEBUG_VIEW_NONE
 
@@ -211,6 +212,8 @@ void main() {
     debug_color = vec3(shadow);
     #elif DEBUG_VIEW == DEBUG_VIEW_GI
     debug_color = indirect_irradiance;
+    #elif DEBUG_VIEW == DEBUG_VIEW_VIS
+    debug_color = id_to_color(triangle_id);
     #endif
     imageStore(F32_UNI(push.draw_image), coord, vec4(debug_color, 1.0));
     return;
