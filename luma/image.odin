@@ -11,6 +11,7 @@ Image :: struct {
 	format:       vk.Format,
 	layout:       vk.ImageLayout, // for image_barriers()
 	mip_levels:   u32,
+	array_layers: u32,
 	bindless_idx: u32,
 }
 
@@ -25,29 +26,38 @@ Image_Create_Desc :: struct {
 		None,
 		Storage,
 		Texture,
+		TextureCube,
 	},
 	mips:              bool,
+	array_layers:      u32 // 6 for a cubemap, else 1
 }
 
 create_image :: proc(device: ^Device, desc: Image_Create_Desc) -> Image {
 	out: Image
 	out.format = desc.format
 	out.layout = .UNDEFINED
+	out.array_layers = max(desc.array_layers, 1)
+	is_cube := desc.register_bindless == .TextureCube
 
 	mip_levels :=
 		1 if !desc.mips else u32(math.floor(math.log2(max(f32(desc.width), f32(desc.height))))) + 1
 
+	image_create_flags: vk.ImageCreateFlags
+	if is_cube {
+		image_create_flags = {.CUBE_COMPATIBLE}
+	}
 	image_ci := vk.ImageCreateInfo {
 		sType       = .IMAGE_CREATE_INFO,
 		imageType   = .D2,
 		extent      = {desc.width, desc.height, 1},
 		mipLevels   = mip_levels,
-		arrayLayers = 1,
+		arrayLayers = out.array_layers,
 		usage       = desc.usage,
 		format      = desc.format,
 		tiling      = .OPTIMAL,
 		sharingMode = .EXCLUSIVE,
 		samples     = {._1},
+		flags       = image_create_flags,
 	}
 	chk(vk.CreateImage(device.device, &image_ci, nil, &out.image))
 
@@ -69,11 +79,11 @@ create_image :: proc(device: ^Device, desc: Image_Create_Desc) -> Image {
 	view_ci := vk.ImageViewCreateInfo {
 		sType = .IMAGE_VIEW_CREATE_INFO,
 		image = out.image,
-		viewType = .D2,
+		viewType = .CUBE if is_cube else .D2,
 		format = desc.format,
 		subresourceRange = {
 			aspectMask = image_aspect_mask(desc.format),
-			layerCount = 1,
+			layerCount = out.array_layers,
 			levelCount = mip_levels,
 		},
 	}
@@ -84,6 +94,8 @@ create_image :: proc(device: ^Device, desc: Image_Create_Desc) -> Image {
 		out.bindless_idx = bindless_register_storage_image(device, out.view, out.format)
 	case .Texture:
 		out.bindless_idx = bindless_register_texture(device, out.view)
+	case .TextureCube:
+		out.bindless_idx = bindless_register_texture_cube(device, out.view)
 	}
 	out.mip_levels = mip_levels
 
@@ -230,7 +242,7 @@ image_barriers :: proc(cb: vk.CommandBuffer, barriers: ..Image_Barrier) {
 			image = b.image.image,
 			subresourceRange = {
 				aspectMask = image_aspect_mask(b.image.format),
-				layerCount = 1,
+				layerCount = max(b.image.array_layers, 1),
 				levelCount = b.image.mip_levels,
 			},
 		}

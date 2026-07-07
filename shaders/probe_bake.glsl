@@ -41,7 +41,7 @@ vec3 trace(vec3 origin, vec3 dir, FrameData frame_data) {
     rayQueryProceedEXT(ray_query);
 
     if (rayQueryGetIntersectionTypeEXT(ray_query, true) == gl_RayQueryCommittedIntersectionNoneEXT) {
-        return frame_data.sky_color;
+        return texture(TEXCUBE_UNI(frame_data.sky_cubemap, frame_data.texture_sampler), dir).rgb;
     }
 
     uint draw_idx = uint(rayQueryGetIntersectionInstanceCustomIndexEXT(ray_query, true));

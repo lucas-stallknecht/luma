@@ -86,7 +86,13 @@ void main() {
     FrameData frame_data = push.frame_data.data;
 
     if (triangle_id == 0) {
-        imageStore(F32_UNI(push.draw_image), coord, vec4(frame_data.sky_color, 1.0));
+        vec2 ndc = (vec2(coord) + 0.5) / vec2(size) * 2.0 - 1.0;
+        vec4 far = frame_data.inv_proj_view * vec4(ndc, 1.0, 1.0);
+        far /= far.w;
+        vec3 ray_dir = normalize(far.xyz - frame_data.camera_position);
+
+        vec3 sky = texture(TEXCUBE_UNI(frame_data.sky_cubemap, frame_data.texture_sampler), ray_dir).rgb;
+        imageStore(F32_UNI(push.draw_image), coord, vec4(sky, 1.0));
         return;
     }
 

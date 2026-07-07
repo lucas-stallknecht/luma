@@ -57,7 +57,7 @@ main :: proc() {
 	device: Device
 	device_init(
 		&device,
-		{enable_validation = true, physical_device_selection_fn = device_selection_fn},
+		{enable_validation = ODIN_DEBUG, physical_device_selection_fn = device_selection_fn},
 	)
 	defer device_cleanup(&device)
 
@@ -115,6 +115,16 @@ main :: proc() {
 				format = .D32_SFLOAT,
 			},
 		},
+	)
+
+	SKY_CUBEMAP_FACES :: 6
+	Sky_Bake_Push :: struct {
+		frame_data:   vk.DeviceAddress,
+		cubemap_image: u32,
+	}
+	sky_bake_pipeline := pipeline_manager_add_compute(
+		&pipeline_manager,
+		{name = "sky_bake", shader = "sky_bake.glsl", push_constant_size = size_of(Sky_Bake_Push)},
 	)
 
 	Shading_Push :: struct {
@@ -272,6 +282,31 @@ main :: proc() {
 		},
 	)
 
+	// sky, baked into a small cubemap once a frame and sampled by shading + GI probe bake
+	SKY_CUBEMAP_SIZE :: 256
+	sky_cubemap := create_image(
+		&device,
+		{
+			width = SKY_CUBEMAP_SIZE,
+			height = SKY_CUBEMAP_SIZE,
+			format = .R32G32B32A32_SFLOAT,
+			usage = {.STORAGE, .SAMPLED},
+			memory = .GPU_ONLY,
+			array_layers = 6,
+			register_bindless = .TextureCube,
+		},
+	)
+	sky_cubemap_array_view_ci := vk.ImageViewCreateInfo {
+		sType = .IMAGE_VIEW_CREATE_INFO,
+		image = sky_cubemap.image,
+		viewType = .D2_ARRAY,
+		format = sky_cubemap.format,
+		subresourceRange = {aspectMask = {.COLOR}, layerCount = 6, levelCount = 1},
+	}
+	sky_cubemap_array_view: vk.ImageView
+	chk(vk.CreateImageView(device.device, &sky_cubemap_array_view_ci, nil, &sky_cubemap_array_view))
+	sky_cubemap_array_idx := bindless_register_storage_image_array(&device, sky_cubemap_array_view)
+
 	// physically based bloom (https://learnopengl.com/Guest-Articles/2022/Phys.-Based-Bloom)
 	// mip 0 = half screen res
 	BLOOM_MIP_COUNT :: 4
@@ -342,22 +377,30 @@ main :: proc() {
 		albedo_boost:    f32,
 		light_color:     glsl.vec3,
 		light_intensity: f32,
-		sky_color:       glsl.vec3,
-		ssao_radius:     f32,
 		grid_min:        glsl.vec3,
 		probe_count:     u32,
 		grid_spacing:    glsl.vec3,
 		frame_idx:       u32,
 		probe_counts:    [3]u32,
 		ssao_pow:        f32,
+		ssao_radius:     f32,
+		time:            f32,
+		cirrus:          f32,
+		cumulus:         f32,
+		cloud_noise_scale:     f32,
+		cloud_noise_speed:     f32,
+		sky_cubemap:     u32,
 	}
 	light_dir := glsl.vec3{0.1, 1.0, -0.1}
 	light_color := glsl.vec3{1.0, 1.0, 1.0}
 	light_intensity: f32 = 12.0
 	albedo_boost: f32 = 1.4
-	sky_color := glsl.vec3{0.5, 0.7, 1.0}
 	ssao_radius: f32 = 0.3
 	ssao_pow: f32 = 1.0
+	cirrus: f32 = 0.4
+	cumulus: f32 = 0.8
+	cloud_noise_scale: f32 = 0.7
+	cloud_noise_speed: f32 = 0.1
 	show_probes := false
 	bloom_intensity: f32 = 0.04
 	bloom_filter_radius: f32 = 0.001
@@ -395,6 +438,8 @@ main :: proc() {
 		destroy_image(&device, visbuffer)
 		destroy_image(&device, draw_image)
 		destroy_image(&device, depth_image)
+		destroy_image(&device, sky_cubemap)
+		vk.DestroyImageView(device.device, sky_cubemap_array_view, nil)
 		destroy_image(&device, bloom_image)
 		destroy_image(&device, bloom_scratch)
 		for i in 0 ..< int(MAX_COMMAND_BUFFERS) {
@@ -476,13 +521,20 @@ main :: proc() {
 			mu.slider(&ui.ctx, &albedo_boost, 1, 4)
 
 			mu.layout_row(&ui.ctx, {-1}, 0)
-			mu.label(&ui.ctx, "Sky color")
-			mu.layout_row(&ui.ctx, {-(SWATCH_WIDTH + SWATCH_GAP)}, 0)
-			sky_color_top := ui_layout_cursor_y(&ui.ctx)
-			mu.slider(&ui.ctx, &sky_color.x, 0, 1)
-			mu.slider(&ui.ctx, &sky_color.y, 0, 1)
-			mu.slider(&ui.ctx, &sky_color.z, 0, 1)
-			ui_color_rect(&ui.ctx, ui_swatch_rect(&ui.ctx, sky_color_top, SWATCH_WIDTH), sky_color)
+			mu.label(&ui.ctx, "Cirrus clouds")
+			mu.slider(&ui.ctx, &cirrus, 0, 1)
+
+			mu.layout_row(&ui.ctx, {-1}, 0)
+			mu.label(&ui.ctx, "Cumulus clouds")
+			mu.slider(&ui.ctx, &cumulus, 0, 1)
+
+			mu.layout_row(&ui.ctx, {-1}, 0)
+			mu.label(&ui.ctx, "Cloud noise size")
+			mu.slider(&ui.ctx, &cloud_noise_scale, 0.01, 1.0)
+
+			mu.layout_row(&ui.ctx, {-1}, 0)
+			mu.label(&ui.ctx, "Cloud noise pan speed")
+			mu.slider(&ui.ctx, &cloud_noise_speed, 0.01, 0.5)
 
 			mu.layout_row(&ui.ctx, {-1}, 0)
 			mu.label(&ui.ctx, "SSAO radius")
@@ -520,15 +572,56 @@ main :: proc() {
 			light_intensity = light_intensity,
 			albedo_boost    = albedo_boost,
 			ssao_radius     = ssao_radius,
-			sky_color       = sky_color,
 			ssao_pow        = ssao_pow,
 			grid_min        = gi.info.grid_min,
 			probe_count     = gi.probe_count,
 			grid_spacing    = gi.grid_spacing,
 			probe_counts    = gi.info.probe_counts,
+			time            = f32(time),
+			cirrus          = cirrus,
+			cumulus         = cumulus,
+			cloud_noise_scale     = cloud_noise_scale,
+			cloud_noise_speed     = cloud_noise_speed,
+			sky_cubemap     = sky_cubemap.bindless_idx,
 		}
 		frame_data_buffer := &frame_data_buffers[handle.buffer_idx]
 		mem.copy(frame_data_mapped[handle.buffer_idx], &frame_data, size_of(Frame_Data))
+
+		// bake the sky into a cubemap
+		// this avoids having to recompute it for each GI probe ray
+		sky_bake_pc := Sky_Bake_Push {
+			frame_data    = frame_data_buffer.device_address,
+			cubemap_image = sky_cubemap_array_idx,
+		}
+		vk.CmdPushConstants(
+			cb,
+			sky_bake_pipeline.layout,
+			{.COMPUTE},
+			0,
+			size_of(Sky_Bake_Push),
+			&sky_bake_pc,
+		)
+		image_barriers(
+			cb,
+			{
+				image = &sky_cubemap,
+				dst_stage = {.COMPUTE_SHADER},
+				dst_access = {.SHADER_STORAGE_WRITE},
+			},
+		)
+		bind_compute_pipeline(cb, sky_bake_pipeline)
+		vk.CmdDispatch(cb, (SKY_CUBEMAP_SIZE + 7) / 8, (SKY_CUBEMAP_SIZE + 7) / 8, SKY_CUBEMAP_FACES)
+
+		image_barriers(
+			cb,
+			{
+				image = &sky_cubemap,
+				src_stage = {.COMPUTE_SHADER},
+				src_access = {.SHADER_STORAGE_WRITE},
+				dst_stage = {.COMPUTE_SHADER},
+				dst_access = {.SHADER_SAMPLED_READ},
+			},
+		)
 
 		// re-bake probes every BAKE_INTERVAL rather than every frame
 		if do_bake {

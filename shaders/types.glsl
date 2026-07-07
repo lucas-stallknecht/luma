@@ -26,14 +26,19 @@ struct FrameData {
     float albedo_boost;
     vec3 light_color;
     float light_intensity;
-    vec3 sky_color;
-    float ssao_radius;
     vec3 grid_min;
     uint probe_count;
     vec3 grid_spacing;
     uint frame_idx;
     ivec3 probe_counts;
     float ssao_pow;
+    float ssao_radius;
+    float time;
+    float cirrus;
+    float cumulus;
+    float cloud_noise_scale;
+    float cloud_noise_speed;
+    uint sky_cubemap;
 };
 
 layout(buffer_reference, std430) readonly buffer FrameDataBuffer {
