@@ -85,7 +85,7 @@ void main() {
     FrameData frame_data = push.frame_data.data;
 
     if (triangle_id == 0) {
-        imageStore(F32(push.draw_image), coord, vec4(frame_data.sky_color, 1.0));
+        imageStore(F32_UNI(push.draw_image), coord, vec4(frame_data.sky_color, 1.0));
         return;
     }
 
@@ -201,7 +201,7 @@ void main() {
     #elif DEBUG_VIEW == DEBUG_VIEW_GI
     debug_color = indirect_irradiance;
     #endif
-    imageStore(F32(push.draw_image), coord, vec4(debug_color, 1.0));
+    imageStore(F32_UNI(push.draw_image), coord, vec4(debug_color, 1.0));
     return;
     #endif
 
@@ -211,5 +211,5 @@ void main() {
 
     vec3 color = ao * indirect_lighting + shadow * direct_lighting;
 
-    imageStore(F32(push.draw_image), coord, vec4(color, 1.0));
+    imageStore(F32_UNI(push.draw_image), coord, vec4(color, 1.0));
 }

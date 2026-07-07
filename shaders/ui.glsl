@@ -45,7 +45,7 @@ layout(location = 1) in vec4 color;
 layout(location = 0) out vec4 frag_color;
 
 void frag_main() {
-    float alpha = texture(TEX(push.atlas_texture, push.atlas_sampler), uv).r;
+    float alpha = texture(TEX_UNI(push.atlas_texture, push.atlas_sampler), uv).r;
     frag_color = vec4(color.rgb, color.a * alpha);
 }
 

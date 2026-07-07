@@ -20,7 +20,7 @@ void main() {
     if (coord.x >= int(push.dst_width) || coord.y >= int(push.dst_height)) return;
 
     vec2 uv = (vec2(coord) + 0.5) / vec2(push.dst_width, push.dst_height);
-    #define SRC TEX(push.src_texture, push.src_sampler)
+    #define SRC TEX_UNI(push.src_texture, push.src_sampler)
 
     float x = push.filter_radius;
     float y = push.filter_radius;
@@ -43,5 +43,5 @@ void main() {
     upsampled *= 1.0 / 16.0;
 
     vec3 base = textureLod(SRC, uv, push.dst_lod).rgb;
-    imageStore(F32(push.dst_image), coord, vec4(base + upsampled, 1.0));
+    imageStore(F32_UNI(push.dst_image), coord, vec4(base + upsampled, 1.0));
 }

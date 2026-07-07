@@ -17,8 +17,13 @@ layout(set = 0, binding = 4, rgba8) uniform image2D images_rgba8[];
 #define U32(idx) images_u32[nonuniformEXT(idx)]
 #define F32(idx) images_f32[nonuniformEXT(idx)]
 #define RGBA8(idx) images_rgba8[nonuniformEXT(idx)]
+#define SAMP_UNI(idx) samplers[idx]
+#define U32_UNI(idx) images_u32[idx]
+#define F32_UNI(idx) images_f32[idx]
+#define RGBA8_UNI(idx) images_rgba8[idx]
 
 // glue a texture index and a sampler index together into something we can texture() with
 #define TEX(tex_idx, samp_idx) sampler2D(textures[nonuniformEXT(tex_idx)], samplers[nonuniformEXT(samp_idx)])
+#define TEX_UNI(tex_idx, samp_idx) sampler2D(textures[tex_idx], samplers[samp_idx])
 
 #endif
