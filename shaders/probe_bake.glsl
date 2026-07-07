@@ -83,7 +83,7 @@ vec3 trace(vec3 origin, vec3 dir, FrameData frame_data) {
 
     // indirect from last bake's field, it goes one deeper bounce per bake
     vec3 indirect_irradiance = sample_probe_irradiance(
-            push.probe_sh_buffer, hit_pos, normal,
+            push.probe_sh_buffer, push.probe_position_buffer, hit_pos, normal, -dir,
             frame_data.grid_min, frame_data.grid_spacing, frame_data.probe_counts
         );
     radiance += albedo / PI * indirect_irradiance;

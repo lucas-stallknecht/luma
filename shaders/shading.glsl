@@ -38,6 +38,7 @@ layout(push_constant) uniform PushConstants {
     UvBuffer uv_buffer;
     MaterialBuffer material_buffer;
     ProbeSHBuffer probe_sh_buffer;
+    ProbePositionBuffer probe_position_buffer;
 } push;
 
 layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
@@ -148,7 +149,10 @@ void main() {
 
     if (material.normal_tex >= 0) {
         vec3 tex_normal = textureGrad(TEX(material.normal_tex, frame_data.texture_sampler), uv, uv_ddx, uv_ddy).rgb;
-        tex_normal = tex_normal * 2.0 - 1.0;
+        tex_normal.xy = tex_normal.xy * 2.0 - 1.0;
+        // BC5/ATI2-compressed normal maps only store xy, reconstruct z instead of trusting the blue channel
+        // this fixed Bistro
+        tex_normal.z = sqrt(clamp(1.0 - dot(tex_normal.xy, tex_normal.xy), 0.0, 1.0));
         surface.normal = normalize(TBN * tex_normal);
     }
 
@@ -177,8 +181,9 @@ void main() {
     ao = pow(ao, frame_data.ssao_pow);
 
     // indirect diffuse from the probe grid
+    vec3 view_dir = normalize(camera_position - world_pos);
     vec3 indirect_irradiance = sample_probe_irradiance(
-            push.probe_sh_buffer, world_pos, surface.normal,
+            push.probe_sh_buffer, push.probe_position_buffer, world_pos, surface.normal, view_dir,
             frame_data.grid_min, frame_data.grid_spacing, frame_data.probe_counts
         );
 
@@ -205,7 +210,6 @@ void main() {
     return;
     #endif
 
-    vec3 view_dir = normalize(camera_position - world_pos);
     vec3 indirect_lighting = surface.albedo / PI * indirect_irradiance;
     vec3 direct_lighting = evaluate_BRDF(surface, view_dir, frame_data.light_dir) * frame_data.light_color * frame_data.light_intensity;
 

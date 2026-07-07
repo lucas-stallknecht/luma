@@ -71,6 +71,12 @@ def get_texture_idx(name: str | None) -> int:
     return idx
 
 
+def get_image_filename(image: bpy.types.Image) -> str:
+    if image.filepath:
+        return bpy.path.basename(image.filepath)
+    return image.name
+
+
 def find_image_sources(
     socket: bpy.types.NodeSocket | None,
     visited: set[bpy.types.Node] | None = None,
@@ -90,7 +96,7 @@ def find_image_sources(
             continue
 
         if isinstance(node, bpy.types.ShaderNodeTexImage) and node.image:
-            images.append(node.image.name)
+            images.append(get_image_filename(node.image))
             continue
 
         # copy visited per-branch so sibling inputs don't block each other

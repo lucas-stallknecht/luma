@@ -8,6 +8,15 @@
 #define PI 3.14159265359
 #endif
 
+// fractions of probe spacing;
+// pushes the sample point off the surface so probes "stucked" in geometry don't dominate the trilinear/backface weighting
+#ifndef PROBE_NORMAL_BIAS
+#define PROBE_NORMAL_BIAS 0.25
+#endif
+#ifndef PROBE_VIEW_BIAS
+#define PROBE_VIEW_BIAS 0.1
+#endif
+
 layout(buffer_reference, buffer_reference_align = 4, scalar) readonly buffer ProbePositionBuffer {
     vec3 positions[];
 };
@@ -40,19 +49,25 @@ int probe_linear_idx(ivec3 coord, ivec3 counts) {
 }
 
 // indirect irradiance at world_pos, trilinear blend of the 8 surrounding probes
-// TODO: add visibility, backface and other weight changes
-// weights sum to 1 atm, make sure to normalize it when it does not
+// TODO: add visibility weighting
+// backface weighting means weights no longer sum to 1, hence the normalize at the end
 vec3 sample_probe_irradiance(
     ProbeSHBuffer sh_buffer,
+    ProbePositionBuffer position_buffer,
     vec3 world_pos,
     vec3 normal,
+    vec3 view_dir,
     vec3 grid_min,
     vec3 grid_spacing,
     ivec3 probe_counts
 ) {
-    // world pos -> fractional probe index (distance from grid origin, in probe spacings)
+    // bias the sample point along the normal and towards the viewer, away from the surface
+    float probe_spacing = min(grid_spacing.x, min(grid_spacing.y, grid_spacing.z));
+    vec3 biased_pos = world_pos + (normal * PROBE_NORMAL_BIAS + view_dir * PROBE_VIEW_BIAS) * probe_spacing;
+
+    // biased pos -> fractional probe index (distance from grid origin, in probe spacings)
     // then take the lower-corner probe and the leftover fraction is the blend to the next
-    vec3 grid_coord = (world_pos - grid_min) / grid_spacing;
+    vec3 grid_coord = (biased_pos - grid_min) / grid_spacing;
 
     ivec3 base_coord = ivec3(floor(grid_coord));
     vec3 frac = grid_coord - vec3(base_coord);
@@ -69,6 +84,12 @@ vec3 sample_probe_irradiance(
         float weight = axis_weight.x * axis_weight.y * axis_weight.z;
 
         int idx = probe_linear_idx(coord, probe_counts);
+
+        // half-space test: keep only probes above the shading point's tangent plane
+        vec3 probe_dir = normalize(position_buffer.positions[idx] - biased_pos);
+        float backface = max(dot(probe_dir, normal), 0.0);
+        weight *= backface * backface + 1e-3;
+
         irradiance += weight * sh_irradiance(sh_buffer.probes[idx], normal);
         total_weight += weight;
     }

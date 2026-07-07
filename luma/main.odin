@@ -118,17 +118,18 @@ main :: proc() {
 	)
 
 	Shading_Push :: struct {
-		frame_data:       vk.DeviceAddress,
-		visbuffer:        u32,
-		draw_image:       u32,
-		index_buffer:     vk.DeviceAddress,
-		vertex_buffer:    vk.DeviceAddress,
-		draw_data_buffer: vk.DeviceAddress,
-		normal_buffer:    vk.DeviceAddress,
-		tangent_buffer:   vk.DeviceAddress,
-		uv_buffer:        vk.DeviceAddress,
-		material_buffer:  vk.DeviceAddress,
-		probe_sh_buffer:  vk.DeviceAddress,
+		frame_data:            vk.DeviceAddress,
+		visbuffer:             u32,
+		draw_image:            u32,
+		index_buffer:          vk.DeviceAddress,
+		vertex_buffer:         vk.DeviceAddress,
+		draw_data_buffer:      vk.DeviceAddress,
+		normal_buffer:         vk.DeviceAddress,
+		tangent_buffer:        vk.DeviceAddress,
+		uv_buffer:             vk.DeviceAddress,
+		material_buffer:       vk.DeviceAddress,
+		probe_sh_buffer:       vk.DeviceAddress,
+		probe_position_buffer: vk.DeviceAddress,
 	}
 	shading_pipeline := pipeline_manager_add_compute(
 		&pipeline_manager,
@@ -232,11 +233,7 @@ main :: proc() {
 		&gi,
 		&device,
 		"assets/sphere.bin",
-		{
-			probe_counts = {24, 6, 10},
-			grid_min= {-11.5, 0.2, -5.4},
-			grid_max = {10.5, 10.0, 5.0},
-		}
+		{probe_counts = {24, 10, 11}, grid_min = {-12.5, -0.2, -6.1}, grid_max = {11.5, 11.0, 5.5}},
 	)
 	defer gi_system_cleanup(&gi, &device)
 
@@ -337,22 +334,22 @@ main :: proc() {
 	bloom_sampler_idx := bindless_register_sampler(&device, bloom_sampler)
 
 	Frame_Data :: struct {
-		proj_view:          glsl.mat4,
-		inv_proj_view:      glsl.mat4,
-		camera_position:    glsl.vec3,
-		texture_sampler:    u32,
-		light_dir:          glsl.vec3,
-		albedo_boost:       f32,
-		light_color:        glsl.vec3,
-		light_intensity:    f32,
-		sky_color:          glsl.vec3,
-		ssao_radius:        f32,
-		grid_min:           glsl.vec3,
-		probe_count:        u32,
-		grid_spacing:       glsl.vec3,
-		frame_idx:          u32,
-		probe_counts:       [3]u32,
-		ssao_pow:           f32,
+		proj_view:       glsl.mat4,
+		inv_proj_view:   glsl.mat4,
+		camera_position: glsl.vec3,
+		texture_sampler: u32,
+		light_dir:       glsl.vec3,
+		albedo_boost:    f32,
+		light_color:     glsl.vec3,
+		light_intensity: f32,
+		sky_color:       glsl.vec3,
+		ssao_radius:     f32,
+		grid_min:        glsl.vec3,
+		probe_count:     u32,
+		grid_spacing:    glsl.vec3,
+		frame_idx:       u32,
+		probe_counts:    [3]u32,
+		ssao_pow:        f32,
 	}
 	light_dir := glsl.vec3{0.1, 1.0, -0.1}
 	light_color := glsl.vec3{1.0, 1.0, 1.0}
@@ -514,21 +511,21 @@ main :: proc() {
 
 		proj_view := camera.proj * camera_get_view(&camera)
 		frame_data := Frame_Data {
-			proj_view          = proj_view,
-			inv_proj_view      = glsl.inverse(proj_view),
-			camera_position    = camera.position,
-			texture_sampler    = texture_sampler_idx,
-			light_dir          = glsl.normalize(light_dir),
-			light_color        = light_color,
-			light_intensity    = light_intensity,
-			albedo_boost       = albedo_boost,
-			ssao_radius        = ssao_radius,
-			sky_color          = sky_color,
-			ssao_pow           = ssao_pow,
-			grid_min           = gi.info.grid_min,
-			probe_count        = gi.probe_count,
-			grid_spacing       = gi.grid_spacing,
-			probe_counts       = gi.info.probe_counts,
+			proj_view       = proj_view,
+			inv_proj_view   = glsl.inverse(proj_view),
+			camera_position = camera.position,
+			texture_sampler = texture_sampler_idx,
+			light_dir       = glsl.normalize(light_dir),
+			light_color     = light_color,
+			light_intensity = light_intensity,
+			albedo_boost    = albedo_boost,
+			ssao_radius     = ssao_radius,
+			sky_color       = sky_color,
+			ssao_pow        = ssao_pow,
+			grid_min        = gi.info.grid_min,
+			probe_count     = gi.probe_count,
+			grid_spacing    = gi.grid_spacing,
+			probe_counts    = gi.info.probe_counts,
 		}
 		frame_data_buffer := &frame_data_buffers[handle.buffer_idx]
 		mem.copy(frame_data_mapped[handle.buffer_idx], &frame_data, size_of(Frame_Data))
@@ -679,17 +676,18 @@ main :: proc() {
 		)
 
 		shading_pc := Shading_Push {
-			frame_data       = frame_data_buffer.device_address,
-			visbuffer        = visbuffer.bindless_idx,
-			draw_image       = draw_image.bindless_idx,
-			index_buffer     = scene.index_buffer.device_address,
-			vertex_buffer    = scene.position_buffer.device_address,
-			draw_data_buffer = scene.draw_data_buffer.device_address,
-			normal_buffer    = scene.normal_buffer.device_address,
-			tangent_buffer   = scene.tangent_buffer.device_address,
-			uv_buffer        = scene.uv_buffer.device_address,
-			material_buffer  = scene.material_buffer.device_address,
-			probe_sh_buffer  = gi.probe_sh_buffer.device_address,
+			frame_data            = frame_data_buffer.device_address,
+			visbuffer             = visbuffer.bindless_idx,
+			draw_image            = draw_image.bindless_idx,
+			index_buffer          = scene.index_buffer.device_address,
+			vertex_buffer         = scene.position_buffer.device_address,
+			draw_data_buffer      = scene.draw_data_buffer.device_address,
+			normal_buffer         = scene.normal_buffer.device_address,
+			tangent_buffer        = scene.tangent_buffer.device_address,
+			uv_buffer             = scene.uv_buffer.device_address,
+			material_buffer       = scene.material_buffer.device_address,
+			probe_sh_buffer       = gi.probe_sh_buffer.device_address,
+			probe_position_buffer = gi.probe_position_buffer.device_address,
 		}
 		vk.CmdPushConstants(
 			cb,
