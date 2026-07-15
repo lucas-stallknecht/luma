@@ -7,7 +7,7 @@ import "core:unicode/utf8"
 import "vendor:glfw"
 import mu "vendor:microui"
 
-MouseState :: enum {
+Mouse_State :: enum {
 	Not_Captured,
 	First_Captured,
 	Fully_Captured,
@@ -20,7 +20,7 @@ Window :: struct {
 	resized:             bool,
 	minimized:           bool,
 	pressed_keys:        [512]bool,
-	mouse_state:         MouseState,
+	mouse_state:         Mouse_State,
 	last_mouse_position: glsl.vec2,
 	mouse_delta:         glsl.vec2,
 	mouse_position:      glsl.vec2,

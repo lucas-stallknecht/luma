@@ -72,16 +72,62 @@ Renderable :: struct {
 	index_count:  u32,
 }
 
-scene_init :: proc(scene: ^Scene, device: ^Device, path: string) {
+// bounds-checks a [offset, offset+size) window against a loaded asset file.
+// u64 math so a corrupt header whose offset+size overflows u32 is still caught
+section_in_bounds :: proc(data_len: int, offset, size: u32, tag, name: string) -> bool {
+	if u64(offset) + u64(size) > u64(data_len) {
+		fmt.eprintfln(
+			"[%s] section %q is out of bounds (offset=%d, size=%d, file=%d bytes): truncated or corrupt",
+			tag,
+			name,
+			offset,
+			size,
+			data_len,
+		)
+		return false
+	}
+	return true
+}
+
+@(private = "file")
+validate_scene_header :: proc(data: []byte, h: Header) -> bool {
+	Section :: struct {
+		offset: u32,
+		size:   u32,
+		name:   string,
+	}
+	sections := [?]Section {
+		{h.positions_offset, h.positions_size, "positions"},
+		{h.normals_offset, h.normals_size, "normals"},
+		{h.tangents_offset, h.tangents_size, "tangents"},
+		{h.uvs_offset, h.uvs_size, "uvs"},
+		{h.indices_offset, h.indices_size, "indices"},
+		{h.textures_offset, h.textures_size, "textures"},
+		{h.materials_offset, h.materials_size, "materials"},
+		{h.renderables_offset, h.renderables_size, "renderables"},
+	}
+	for s in sections {
+		if !section_in_bounds(len(data), s.offset, s.size, "Scene", s.name) do return false
+	}
+	return true
+}
+
+scene_init :: proc(scene: ^Scene, device: ^Device, path: string) -> bool {
 	fmt.println("[Scene] Loading", path)
 
 	data, err := os.read_entire_file(path, context.temp_allocator)
-	if data == nil {
-		fmt.println("[Scene] Failed to open", path)
-		return
+	if err != nil {
+		fmt.eprintln("[Scene] Failed to open", path, ":", err)
+		return false
+	}
+	if len(data) < size_of(Header) {
+		fmt.eprintfln("[Scene] %q is too small to contain a header (%d bytes)", path, len(data))
+		return false
 	}
 
 	header := (^Header)(raw_data(data))^
+	if !validate_scene_header(data, header) do return false
+
 	scene.triangle_count = (header.indices_size / size_of(u32)) / 3
 	fmt.println("- triangle count :", scene.triangle_count)
 
@@ -200,7 +246,8 @@ scene_init :: proc(scene: ^Scene, device: ^Device, path: string) {
 		tex_width, tex_height, tex_channels: i32
 		tex_data := stbi.load(tex_path_cstr, &tex_width, &tex_height, &tex_channels, 4)
 		if tex_data == nil {
-			fmt.println("[Scene] Failed to load texture", tex_path)
+			// non-fatal: the material's index stays -1 and the shader falls back to base color
+			fmt.eprintln("[Scene] Failed to load texture, skipping:", tex_path)
 			continue
 		}
 		defer stbi.image_free(tex_data)
@@ -468,6 +515,8 @@ scene_init :: proc(scene: ^Scene, device: ^Device, path: string) {
 		destroy_buffer(device, &t)
 	}
 	delete(temp_pool)
+
+	return true
 }
 
 scene_cleanup :: proc(scene: ^Scene, device: ^Device) {
@@ -529,7 +578,8 @@ make_transform :: proc(t: [16]f32) -> glsl.mat4 {
 
 @(private = "file")
 get_texture_bindless_idx :: proc(images: []Image, idx: i32) -> i32 {
-	if idx == -1 {
+	// idx < 0 means "no texture" and an out-of-range idx means a corrupt material, treat both as none
+	if idx < 0 || int(idx) >= len(images) {
 		return -1
 	}
 

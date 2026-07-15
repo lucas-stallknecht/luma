@@ -59,7 +59,7 @@ create_swapchain :: proc(
 ) -> (
 	swapchain: Swapchain,
 ) {
-	avbailable_surface_formats: []vk.SurfaceFormatKHR
+	available_surface_formats: []vk.SurfaceFormatKHR
 	available_present_modes: []vk.PresentModeKHR
 	surface: vk.SurfaceKHR
 	surface_caps: vk.SurfaceCapabilitiesKHR
@@ -90,9 +90,8 @@ create_swapchain :: proc(
 		vk.GetPhysicalDeviceSurfaceCapabilitiesKHR(d.physical_device, surface, &surface_caps)
 		format_count: u32
 		vk.GetPhysicalDeviceSurfaceFormatsKHR(d.physical_device, surface, &format_count, nil)
-		vk.GetPhysicalDeviceSurfaceFormatsKHR(d.physical_device, surface, &format_count, nil)
 		if format_count == 0 do fmt.panicf("[Swapchain] No surface formats available")
-		avbailable_surface_formats = make(
+		available_surface_formats = make(
 			[]vk.SurfaceFormatKHR,
 			format_count,
 			context.temp_allocator,
@@ -101,7 +100,7 @@ create_swapchain :: proc(
 			d.physical_device,
 			surface,
 			&format_count,
-			raw_data(avbailable_surface_formats),
+			raw_data(available_surface_formats),
 		)
 
 		mode_count: u32
@@ -119,15 +118,15 @@ create_swapchain :: proc(
 	// swapchain
 	{
 		/*
-		Try getting the preffered format + color space,
+		Try getting the preferred format + color space,
 		If you can't, try getting the format at least,
 		If this also fails, get the first available format
 		*/
-		surface_format, same := choose_surface_format(
+		surface_format, format_available := choose_surface_format(
 			desc.preferred_surface_format.? or_else DEFAULT_PREFERRED_SURFACE_FORMAT,
-			avbailable_surface_formats,
+			available_surface_formats,
 		)
-		if !same {
+		if !format_available {
 			fmt.printfln(
 				"[Device] Preferred surface format was not available. %v has been chosen",
 				surface_format,
@@ -135,11 +134,11 @@ create_swapchain :: proc(
 		}
 
 		// preferred -> immediate -> fifo
-		present_mode, same_ := choose_present_mode(
+		present_mode, mode_available := choose_present_mode(
 			desc.preferred_present_mode.? or_else DEFAULT_PREFERRED_PRESENT_MODE,
 			available_present_modes,
 		)
-		if !same_ {
+		if !mode_available {
 			fmt.printfln(
 				"[Device] Preferred presentation mode was not available. %v has been chosen",
 				present_mode,
@@ -339,12 +338,10 @@ swapchain_present :: proc(s: ^Swapchain) {
 	fmt.assertf(
 		!s.need_acquire,
 		"[Swapchain] ASSERT Present called without a prior acquire." +
-		"You must call swapchain_get_draw_texture() before presenting a frame.",
+		"You must call swapchain_acquire_image() before presenting a frame.",
 	)
 
-	latest_handle, latest_semaphore := command_handler_get_latest_submission(
-		&s.device.command_handler,
-	)
+	_, latest_semaphore := command_handler_get_latest_submission(&s.device.command_handler)
 	fmt.assertf(
 		latest_semaphore != 0,
 		"[Swapchain] ASSERT Present called but no GPU work was submitted." +
@@ -375,14 +372,14 @@ choose_surface_format :: proc(
 	format: vk.SurfaceFormatKHR,
 	same: bool,
 ) {
-	for format in available {
-		if preferred.format == format.format && preferred.colorSpace == format.colorSpace {
-			return format, true
+	for f in available {
+		if preferred.format == f.format && preferred.colorSpace == f.colorSpace {
+			return f, true
 		}
 	}
-	for format in available {
-		if preferred.format == format.format {
-			return format, false
+	for f in available {
+		if preferred.format == f.format {
+			return f, false
 		}
 	}
 	return available[0], false
@@ -393,17 +390,17 @@ choose_present_mode :: proc(
 	preferred: vk.PresentModeKHR,
 	available: []vk.PresentModeKHR,
 ) -> (
-	format: vk.PresentModeKHR,
+	mode: vk.PresentModeKHR,
 	same: bool,
 ) {
-	for mode in available {
-		if mode == preferred {
-			return mode, true
+	for m in available {
+		if m == preferred {
+			return m, true
 		}
 	}
-	for mode in available {
-		if mode == .IMMEDIATE {
-			return mode, false
+	for m in available {
+		if m == .IMMEDIATE {
+			return m, false
 		}
 	}
 	return .FIFO, false

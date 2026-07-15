@@ -19,8 +19,8 @@ Gi_System :: struct {
 
 Gi_System_Info :: struct {
 	probe_counts: [3]u32,
-	grid_min:        glsl.vec3,
-	grid_max:        glsl.vec3,
+	grid_min:     glsl.vec3,
+	grid_max:     glsl.vec3,
 }
 
 gi_system_init :: proc(
@@ -28,25 +28,44 @@ gi_system_init :: proc(
 	device: ^Device,
 	probe_debug_path: string,
 	info: Gi_System_Info,
-) {
+) -> bool {
 	fmt.println("[Gi] Loading", probe_debug_path)
 
-	data, ok := os.read_entire_file(probe_debug_path, context.temp_allocator)
-	if data == nil {
-		fmt.println("[Gi] Failed to open", probe_debug_path)
-		return
+	data, err := os.read_entire_file(probe_debug_path, context.temp_allocator)
+	if err != nil {
+		fmt.eprintln("[Gi] Failed to open", probe_debug_path, "-", err)
+		return false
+	}
+	if len(data) < size_of(Header) {
+		fmt.eprintfln(
+			"[Gi] %q is too small to contain a header (%d bytes)",
+			probe_debug_path,
+			len(data),
+		)
+		return false
 	}
 
 	header := (^Header)(raw_data(data))^
+	if !section_in_bounds(
+		   len(data),
+		   header.positions_offset,
+		   header.positions_size,
+		   "Gi",
+		   "positions",
+	   ) ||
+	   !section_in_bounds(len(data), header.normals_offset, header.normals_size, "Gi", "normals") {
+		return false
+	}
 
 	handle, cb := command_handler_acquire(&device.command_handler)
 	temp_pool := make([dynamic]Buffer, context.temp_allocator)
 
-
 	gi.info = info
 	spacings: [3]f32 = {}
 	for i in 0 ..< 3 {
-		spacings[i] = (info.grid_max[i] - info.grid_min[i]) / f32(info.probe_counts[i] - 1)
+		// a single probe along an axis has no spacing; guard the divide
+		spacings[i] =
+			(info.grid_max[i] - info.grid_min[i]) / f32(info.probe_counts[i] - 1) if info.probe_counts[i] > 1 else 0
 	}
 	gi.grid_spacing = spacings
 	gi.probe_count = info.probe_counts[0] * info.probe_counts[1] * info.probe_counts[2]
@@ -57,9 +76,7 @@ gi_system_init :: proc(
 		for y in 0 ..< info.probe_counts[1] {
 			for x in 0 ..< info.probe_counts[0] {
 				idx :=
-					x +
-					y * info.probe_counts[0] +
-					z * info.probe_counts[0] * info.probe_counts[1]
+					x + y * info.probe_counts[0] + z * info.probe_counts[0] * info.probe_counts[1]
 				positions[idx] = glsl.vec3 {
 					info.grid_min.x + f32(x) * spacings.x,
 					info.grid_min.y + f32(y) * spacings.y,
@@ -129,6 +146,8 @@ gi_system_init :: proc(
 		destroy_buffer(device, &t)
 	}
 	delete(temp_pool)
+
+	return true
 }
 
 gi_system_cleanup :: proc(gi: ^Gi_System, device: ^Device) {

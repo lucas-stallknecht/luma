@@ -25,6 +25,7 @@ Device :: struct {
 		compute_family_idx:  u32,
 	},
 	device:                  vk.Device,
+	memory_properties:       vk.PhysicalDeviceMemoryProperties,
 	available_depth_formats: [dynamic]vk.Format,
 	descriptor_pool:         vk.DescriptorPool,
 	descriptor_layout:       vk.DescriptorSetLayout,
@@ -136,6 +137,7 @@ device_init :: proc(d: ^Device, desc: Device_Desc) {
 			break
 		}
 		if d.physical_device == nil do fmt.panicf("[Device] No suitable physical device selected")
+		vk.GetPhysicalDeviceMemoryProperties(d.physical_device, &d.memory_properties)
 	}
 
 	// queues
@@ -348,9 +350,7 @@ find_memory_type :: proc(
 	type_filter: u32,
 	properties: vk.MemoryPropertyFlags,
 ) -> u32 {
-	mem_properties: vk.PhysicalDeviceMemoryProperties
-	vk.GetPhysicalDeviceMemoryProperties(device.physical_device, &mem_properties)
-
+	mem_properties := device.memory_properties
 	for i in 0 ..< mem_properties.memoryTypeCount {
 		if (type_filter & (1 << i) != 0) &&
 		   (properties & mem_properties.memoryTypes[i].propertyFlags) == properties { 	// memory type is suitable

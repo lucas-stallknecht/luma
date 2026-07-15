@@ -219,6 +219,13 @@ create_raster_pipeline :: proc(m: ^Pipeline_Manager, pipeline: ^Raster_Pipeline)
 			pipeline.cached_spirv.fragment = fragment_spv
 		}
 	}
+	if len(pipeline.cached_spirv.vertex) == 0 || len(pipeline.cached_spirv.fragment) == 0 {
+		fmt.panicf(
+			"[Pipeline] Could not build raster pipeline %q: shader %q failed to compile (see glslc output above)",
+			info.name,
+			info.shader,
+		)
+	}
 
 	modules: [2]vk.ShaderModule
 	defer {
@@ -291,7 +298,7 @@ create_raster_pipeline :: proc(m: ^Pipeline_Manager, pipeline: ^Raster_Pipeline)
 			}
 			continue
 		}
-		switch ca.blend {
+		switch blend {
 		case .Alpha:
 			color_blend_attachments[i] = vk.PipelineColorBlendAttachmentState {
 				blendEnable         = true,
@@ -501,6 +508,13 @@ create_compute_pipeline :: proc(m: ^Pipeline_Manager, pipeline: ^Compute_Pipelin
 			pipeline.cached_spirv = spv
 		}
 	}
+	if len(pipeline.cached_spirv) == 0 {
+		fmt.panicf(
+			"[Pipeline] Could not build compute pipeline %q: shader %q failed to compile (see glslc output above)",
+			info.name,
+			info.shader,
+		)
+	}
 
 	module: vk.ShaderModule
 	defer if module != 0 {
@@ -657,10 +671,7 @@ compile_and_load_spirv :: proc(
 	append(&command, ..defines)
 	append(&command, src_path, "-o", dst_path)
 
-	state, stdout, stderr, proc_err := os.process_exec(
-		{command = command[:]},
-		context.temp_allocator,
-	)
+	state, _, stderr, proc_err := os.process_exec({command = command[:]}, context.temp_allocator)
 	if proc_err != nil {
 		fmt.eprintfln("failed to run glslc: %v", proc_err)
 		return nil, false
