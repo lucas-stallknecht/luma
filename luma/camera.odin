@@ -15,7 +15,7 @@ Camera :: struct {
 	proj:             glsl.mat4,
 }
 
-create_camera :: proc() -> Camera {
+create_default_camera :: proc() -> Camera {
 	return Camera {
 		near = 0.01,
 		far = 100.0,

@@ -1,6 +1,6 @@
 # luma
 
-luma is a toy renderer written in Odin and Vulkan. It has no external dependencies beyond the "vendor" libraries that ship with Odin, so it builds without any setup. It's mostly a place for me to try out rendering techniques I want to understand.
+luma is a toy renderer written in Odin and Vulkan. Beyond the "vendor" libraries that ship with Odin, its only dependency is [Dear ImGui](https://github.com/ocornut/imgui) (via [odin-imgui](https://gitlab.com/L-4/odin-imgui)) for the debug UI, vendored as a git submodule and built once with a small setup script. It's mostly a place for me to try out rendering techniques I want to understand.
 
 Scenes are exported from Blender via the `tools/blender_export` Python script, straight into a binary format the renderer reads directly.
 
@@ -30,12 +30,17 @@ Scenes are exported from Blender via the `tools/blender_export` Python script, s
 - Ray Tracing
 - On-demand command handling
 
+## UI
+
+The debug panel (light/sky/SSAO/bloom controls, frame time) is [Dear ImGui](https://github.com/ocornut/imgui), integrated through its stock Vulkan + GLFW backends running in dynamic-rendering mode.
+
 ## Building
 
-You'll need the [Odin compiler](https://odin-lang.org/) and the [Vulkan SDK](https://vulkan.lunarg.com/) installed, along with a GPU that supports Vulkan ray tracing (`VK_KHR_ray_tracing_pipeline`). With those in place:
+You'll need the [Odin compiler](https://odin-lang.org/), the [Vulkan SDK](https://vulkan.lunarg.com/), Python, and Git installed, along with a GPU that supports Vulkan ray tracing (`VK_KHR_ray_tracing_pipeline`). With those in place:
 
 ```sh
+git submodule update --init
+python pre_build.py   # clones and builds the Dear ImGui backends used by imgui/build.py, once
 mkdir build
 odin run luma -out:build/luma
-./build/luma
 ```

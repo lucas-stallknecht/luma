@@ -3,8 +3,8 @@ package luma
 import "core:fmt"
 import "core:math/linalg/glsl"
 import "core:mem"
+import imgui "../imgui"
 import "vendor:glfw"
-import mu "vendor:microui"
 import vk "vendor:vulkan"
 
 device_selection_fn :: proc(idx: int, properties: vk.PhysicalDeviceProperties2) -> bool {
@@ -226,14 +226,10 @@ main :: proc() {
 		},
 	)
 
-	// mu.Context alone is ~256KB, keep it off the stack
-	ui := new(Ui)
-	defer free(ui)
-	ui_init(ui, &device, &pipeline_manager, swapchain.format)
-	defer ui_cleanup(ui, &device)
-	window.ui_ctx = &ui.ctx // forward GLFW input to microui
+	ui_init(&device, &window, &swapchain)
+	defer ui_cleanup()
 
-	camera := create_camera()
+	camera := create_default_camera()
 	camera_update_proj(&camera, f32(window.width) / f32(window.height))
 
 	scene: Scene
@@ -524,78 +520,37 @@ main :: proc() {
 		height := window.height
 
 		// ui
-		mu.begin(&ui.ctx)
-		if mu.window(&ui.ctx, "Debug", {x = 20, y = 20, w = 320, h = 800}) {
+		ui_new_frame()
+		imgui.SetNextWindowPos({20, 20}, .Once)
+		imgui.SetNextWindowSize({320, 800}, .Once)
+		if imgui.Begin("Debug") {
 			fps := 1.0 / dt if dt > 0 else 0
-			mu.layout_row(&ui.ctx, {-1}, 0)
-			mu.label(&ui.ctx, fmt.tprintf("%.2f ms (%.0f fps)", dt * 1000, fps))
+			imgui.Text("%.2f ms (%.0f fps)", dt * 1000, fps)
 
-			SWATCH_WIDTH :: 50
-			SWATCH_GAP :: 8
+			imgui.SeparatorText("Lighting")
+			imgui.SliderFloat3("Direction", cast(^[3]f32)&light_dir, -1, 1)
+			imgui.ColorEdit3("Color", cast(^[3]f32)&light_color)
+			imgui.SliderFloat("Light intensity", &light_intensity, 0, 40)
+			imgui.SliderFloat("Albedo boost", &albedo_boost, 1, 4)
 
-			mu.label(&ui.ctx, "Light direction")
-			mu.layout_row(&ui.ctx, {-1}, 0)
-			mu.slider(&ui.ctx, &light_dir.x, -1, 1)
-			mu.slider(&ui.ctx, &light_dir.y, -1, 1)
-			mu.slider(&ui.ctx, &light_dir.z, -1, 1)
+			imgui.SeparatorText("Sky")
+			imgui.SliderFloat("Cirrus clouds", &cirrus, 0, 1)
+			imgui.SliderFloat("Cumulus clouds", &cumulus, 0, 1)
+			imgui.SliderFloat("Noise size", &cloud_noise_scale, 0.01, 1.0)
+			imgui.SliderFloat("Noise pan speed", &cloud_noise_speed, 0.01, 0.5)
 
-			mu.layout_row(&ui.ctx, {-1}, 0)
-			mu.label(&ui.ctx, "Light color")
-			mu.layout_row(&ui.ctx, {-(SWATCH_WIDTH + SWATCH_GAP)}, 0)
-			light_color_top := ui_layout_cursor_y(&ui.ctx)
-			mu.slider(&ui.ctx, &light_color.x, 0, 1)
-			mu.slider(&ui.ctx, &light_color.y, 0, 1)
-			mu.slider(&ui.ctx, &light_color.z, 0, 1)
-			ui_color_rect(
-				&ui.ctx,
-				ui_swatch_rect(&ui.ctx, light_color_top, SWATCH_WIDTH),
-				light_color,
-			)
+			imgui.SeparatorText("Ambient Occlusion")
+			imgui.SliderFloat("Radius", &ssao_radius, 0, 2)
+			imgui.SliderFloat("Power", &ssao_pow, 0.1, 8)
 
-			mu.layout_row(&ui.ctx, {-1}, 0)
-			mu.label(&ui.ctx, "Light intensity")
-			mu.slider(&ui.ctx, &light_intensity, 0, 40)
+			imgui.SeparatorText("Bloom")
+			imgui.SliderFloat("Bloom intensity", &bloom_intensity, 0.001, 0.2)
+			imgui.SliderFloat("Filter radius", &bloom_filter_radius, 0.001, 0.01)
 
-			mu.layout_row(&ui.ctx, {-1}, 0)
-			mu.label(&ui.ctx, "Albedo boost")
-			mu.slider(&ui.ctx, &albedo_boost, 1, 4)
-
-			mu.layout_row(&ui.ctx, {-1}, 0)
-			mu.label(&ui.ctx, "Cirrus clouds")
-			mu.slider(&ui.ctx, &cirrus, 0, 1)
-
-			mu.layout_row(&ui.ctx, {-1}, 0)
-			mu.label(&ui.ctx, "Cumulus clouds")
-			mu.slider(&ui.ctx, &cumulus, 0, 1)
-
-			mu.layout_row(&ui.ctx, {-1}, 0)
-			mu.label(&ui.ctx, "Cloud noise size")
-			mu.slider(&ui.ctx, &cloud_noise_scale, 0.01, 1.0)
-
-			mu.layout_row(&ui.ctx, {-1}, 0)
-			mu.label(&ui.ctx, "Cloud noise pan speed")
-			mu.slider(&ui.ctx, &cloud_noise_speed, 0.01, 0.5)
-
-			mu.layout_row(&ui.ctx, {-1}, 0)
-			mu.label(&ui.ctx, "SSAO radius")
-			mu.slider(&ui.ctx, &ssao_radius, 0, 2)
-
-			mu.layout_row(&ui.ctx, {-1}, 0)
-			mu.label(&ui.ctx, "SSAO power")
-			mu.slider(&ui.ctx, &ssao_pow, 0.1, 8)
-
-			mu.layout_row(&ui.ctx, {-1}, 0)
-			mu.checkbox(&ui.ctx, "Show probes", &show_probes)
-
-			mu.layout_row(&ui.ctx, {-1}, 0)
-			mu.label(&ui.ctx, "Bloom intensity")
-			mu.slider(&ui.ctx, &bloom_intensity, 0.001, 0.2)
-
-			mu.layout_row(&ui.ctx, {-1}, 0)
-			mu.label(&ui.ctx, "Bloom filter radius")
-			mu.slider(&ui.ctx, &bloom_filter_radius, 0.001, 0.01)
+			imgui.SeparatorText("Global Illumination")
+			imgui.Checkbox("Show probes", &show_probes)
 		}
-		mu.end(&ui.ctx)
+		imgui.End()
 
 		// render loop
 		swapchain_image := swapchain_acquire_image(&swapchain)
@@ -1003,7 +958,7 @@ main :: proc() {
 			vk.CmdDraw(cb, gi.debug_sphere_vertex_count, gi.probe_count, 0, 0)
 		}
 
-		ui_render(ui, cb, handle.buffer_idx, width, height)
+		ui_render(cb)
 
 		vk.CmdEndRendering(cb)
 
