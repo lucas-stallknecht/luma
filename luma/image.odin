@@ -9,7 +9,7 @@ Image :: struct {
 	view:         vk.ImageView,
 	memory:       vk.DeviceMemory,
 	format:       vk.Format,
-	layout:       vk.ImageLayout, // for image_barriers()
+	layout:       vk.ImageLayout, // mirrors current GPU layout; kept in sync by image_barriers()
 	mip_levels:   u32,
 	array_layers: u32,
 	bindless_idx: u32,
@@ -21,7 +21,7 @@ Image_Create_Desc :: struct {
 	format:            vk.Format,
 	usage:             vk.ImageUsageFlags,
 	memory:            Memory_Preset,
-	// registers into the bindless set on creation, fills Image.bindless_index
+	// registers a bindless slot on creation and fills Image.bindless_idx
 	register_bindless: enum {
 		None,
 		Storage,
@@ -29,7 +29,7 @@ Image_Create_Desc :: struct {
 		TextureCube,
 	},
 	mips:              bool,
-	array_layers:      u32 // 6 for a cubemap, else 1
+	array_layers:      u32, // 6 for a cubemap, else 1
 }
 
 create_image :: proc(device: ^Device, desc: Image_Create_Desc) -> Image {
@@ -119,11 +119,7 @@ create_and_upload_image :: proc(
 		{size = data_size, usage = {.TRANSFER_SRC}, memory = .CPU_UPLOAD},
 	)
 	append(temp_pool, staging)
-
-	mapped: rawptr
-	vk.MapMemory(device.device, staging.memory, 0, data_size, {}, &mapped)
-	intrinsics.mem_copy(mapped, data, int(data_size))
-	vk.UnmapMemory(device.device, staging.memory)
+	intrinsics.mem_copy(staging.mapped, data, int(data_size))
 
 	image_barriers(cb, {image = &out, dst_stage = {.TRANSFER}, dst_access = {.TRANSFER_WRITE}})
 
@@ -133,7 +129,7 @@ create_and_upload_image :: proc(
 	}
 	vk.CmdCopyBufferToImage(cb, staging.buffer, out.image, .GENERAL, 1, &copy_region)
 
-	// generate mips
+	// one-time mips via blit chain, not runtime-regenerated
 	if desc.mips {
 		barrier := vk.ImageMemoryBarrier2 {
 			sType = .IMAGE_MEMORY_BARRIER_2,
@@ -207,51 +203,12 @@ destroy_image :: proc(device: ^Device, image: Image) {
 	}
 }
 
-// only depth format we use right now, add more if needed
 image_aspect_mask :: proc(format: vk.Format) -> vk.ImageAspectFlags {
 	#partial switch format {
+	// only depth format we use right now, add more if needed
 	case .D32_SFLOAT, .D16_UNORM:
 		return {.DEPTH}
 	case:
 		return {.COLOR}
 	}
-}
-
-// everything stays in GENERAL forever, so all you describe here is the
-// sync, not the layout dance. swapchain is the only thing that ever leaves
-// GENERAL (needs PRESENT_SRC_KHR), see swapchain_barrier_to_present
-Image_Barrier :: struct {
-	image:      ^Image,
-	src_stage:  vk.PipelineStageFlags2,
-	src_access: vk.AccessFlags2,
-	dst_stage:  vk.PipelineStageFlags2,
-	dst_access: vk.AccessFlags2,
-}
-
-image_barriers :: proc(cb: vk.CommandBuffer, barriers: ..Image_Barrier) {
-	vk_barriers := make([]vk.ImageMemoryBarrier2, len(barriers), context.temp_allocator)
-	for b, i in barriers {
-		vk_barriers[i] = vk.ImageMemoryBarrier2 {
-			sType = .IMAGE_MEMORY_BARRIER_2,
-			srcStageMask = b.src_stage,
-			srcAccessMask = b.src_access,
-			dstStageMask = b.dst_stage,
-			dstAccessMask = b.dst_access,
-			oldLayout = b.image.layout,
-			newLayout = .GENERAL,
-			image = b.image.image,
-			subresourceRange = {
-				aspectMask = image_aspect_mask(b.image.format),
-				layerCount = max(b.image.array_layers, 1),
-				levelCount = b.image.mip_levels,
-			},
-		}
-		b.image.layout = .GENERAL
-	}
-	dep := vk.DependencyInfo {
-		sType                   = .DEPENDENCY_INFO,
-		imageMemoryBarrierCount = u32(len(vk_barriers)),
-		pImageMemoryBarriers    = raw_data(vk_barriers),
-	}
-	vk.CmdPipelineBarrier2(cb, &dep)
 }

@@ -3,7 +3,6 @@ package luma
 import "core:fmt"
 import "core:math/linalg/glsl"
 import "core:os"
-import "core:slice"
 import vk "vendor:vulkan"
 
 Gi_System :: struct {
@@ -36,7 +35,7 @@ gi_system_init :: proc(
 		fmt.eprintln("[Gi] Failed to open", probe_debug_path, "-", err)
 		return false
 	}
-	if len(data) < size_of(Header) {
+	if len(data) < size_of(Asset_Header) {
 		fmt.eprintfln(
 			"[Gi] %q is too small to contain a header (%d bytes)",
 			probe_debug_path,
@@ -45,7 +44,7 @@ gi_system_init :: proc(
 		return false
 	}
 
-	header := (^Header)(raw_data(data))^
+	header := (^Asset_Header)(raw_data(data))^
 	if !section_in_bounds(
 		   len(data),
 		   header.positions_offset,
@@ -96,7 +95,7 @@ gi_system_init :: proc(
 			memory = .GPU_ONLY,
 		},
 	)
-	// spherical harmonics coefficients baked on the GPU.
+	// SH coefficients, baked on the GPU each bake pass
 	gi.probe_sh_buffer = create_buffer(
 		device,
 		{
@@ -108,30 +107,25 @@ gi_system_init :: proc(
 	// zero it so the first bake's feedback read sees a black field instead of garbage
 	vk.CmdFillBuffer(cb, gi.probe_sh_buffer.buffer, 0, vk.DeviceSize(vk.WHOLE_SIZE), 0)
 
-	// debug model
-	vertex_positions_bytes := data[header.positions_offset:header.positions_offset +
-	header.positions_size]
-	vertex_positions := slice.reinterpret([]f32, vertex_positions_bytes)
+	// debug sphere model, drawn once per probe when "Show probes" is on
 	gi.debug_sphere_vertex_buffer = create_and_upload_buffer(
 		device,
 		&temp_pool,
 		cb,
-		raw_data(vertex_positions),
+		raw_data(data[header.positions_offset:]),
 		{
 			size = vk.DeviceSize(header.positions_size),
 			usage = {.STORAGE_BUFFER, .SHADER_DEVICE_ADDRESS},
 			memory = .GPU_ONLY,
 		},
 	)
-	gi.debug_sphere_vertex_count = u32(len(vertex_positions) / 3)
+	gi.debug_sphere_vertex_count = header.positions_size / size_of(glsl.vec3)
 
-	vertex_normals_bytes := data[header.normals_offset:header.normals_offset + header.normals_size]
-	vertex_normals := slice.reinterpret([]f32, vertex_normals_bytes)
 	gi.debug_sphere_normal_buffer = create_and_upload_buffer(
 		device,
 		&temp_pool,
 		cb,
-		raw_data(vertex_normals),
+		raw_data(data[header.normals_offset:]),
 		{
 			size = vk.DeviceSize(header.normals_size),
 			usage = {.STORAGE_BUFFER, .SHADER_DEVICE_ADDRESS},

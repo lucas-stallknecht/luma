@@ -1,7 +1,6 @@
 package luma
 
 import "core:fmt"
-import "core:math/bits"
 import "vendor:glfw"
 import vk "vendor:vulkan"
 
@@ -27,7 +26,7 @@ Swapchain :: struct {
 	surface:              vk.SurfaceKHR,
 	format:               vk.Format,
 	swapchain:            vk.SwapchainKHR,
-	// store the create info for easier update
+	// kept around so the upcoming resize can recreate the swapchain from it
 	create_info:          vk.SwapchainCreateInfoKHR,
 	images:               []vk.Image,
 	image_views:          []vk.ImageView,
@@ -65,26 +64,6 @@ create_swapchain :: proc(
 	surface_caps: vk.SurfaceCapabilitiesKHR
 	// surface capabilities
 	{
-		depth_formats := [?]vk.Format {
-			.D32_SFLOAT_S8_UINT,
-			.D24_UNORM_S8_UINT,
-			.D16_UNORM_S8_UINT,
-			.D32_SFLOAT,
-			.D16_UNORM,
-		}
-		d.available_depth_formats = make([dynamic]vk.Format)
-		for format in depth_formats {
-			format_props := vk.FormatProperties2 {
-				sType = .FORMAT_PROPERTIES_2,
-			}
-			vk.GetPhysicalDeviceFormatProperties2(d.physical_device, format, &format_props)
-			if vk.FormatFeatureFlag.DEPTH_STENCIL_ATTACHMENT in
-			   format_props.formatProperties.optimalTilingFeatures {
-				append(&d.available_depth_formats, format)
-				break
-			}
-		}
-
 		chk(glfw.CreateWindowSurface(d.instance, window, nil, &surface))
 
 		vk.GetPhysicalDeviceSurfaceCapabilitiesKHR(d.physical_device, surface, &surface_caps)
@@ -149,8 +128,6 @@ create_swapchain :: proc(
 		image_count := min(surface_caps.maxImageCount, desired_image_count)
 
 		swapchain.device = d
-
-		// inlined swapchain_init
 		swapchain.surface = surface
 		swapchain.format = surface_format.format
 		family_idx := swapchain.device.queues.graphics_family_idx
@@ -258,9 +235,10 @@ create_swapchain :: proc(
 	return swapchain
 }
 
-// swapchain image is treated as GENERAL the rest of the time, this just
-// flips it to PRESENT_SRC_KHR right before presenting since Vulkan requires it
+
 swapchain_barrier_to_present :: proc(cb: vk.CommandBuffer, img: Swapchain_Image) {
+	// swapchain image is treated as GENERAL the rest of the time, this just
+	// flips it to PRESENT_SRC_KHR right before presenting since Vulkan requires it
 	barrier := vk.ImageMemoryBarrier2 {
 		sType = .IMAGE_MEMORY_BARRIER_2,
 		srcStageMask = {.COLOR_ATTACHMENT_OUTPUT},
@@ -303,14 +281,14 @@ swapchain_acquire_image :: proc(s: ^Swapchain) -> (image: Swapchain_Image) {
 			pSemaphores    = &s.timeline_semaphore,
 			pValues        = &s.timeline_wait_values[s.current_image_idx],
 		}
-		vk.WaitSemaphores(s.device.device, &wait_info, bits.U64_MAX)
+		vk.WaitSemaphores(s.device.device, &wait_info, max(u64))
 
 		acquire_sem := s.acquire_semaphores[s.current_image_idx]
 		chk_swapchain(
 			vk.AcquireNextImageKHR(
 				s.device.device,
 				s.swapchain,
-				bits.U64_MAX,
+				max(u64),
 				acquire_sem,
 				0,
 				&s.current_image_idx,
@@ -318,15 +296,16 @@ swapchain_acquire_image :: proc(s: ^Swapchain) -> (image: Swapchain_Image) {
 			&s.need_update,
 		)
 		s.need_acquire = false
-		command_handler_request_semaphore_wait(&s.device.command_handler, acquire_sem)
+		// the next submission waits on the acquire, and its final signal releases
+		// this image slot for a future frame (see command_handler_submit)
+		s.device.command_handler.wait_semaphore = acquire_sem
 
 		signal_value := s.frame_idx + u64(len(s.images))
 		s.timeline_wait_values[s.current_image_idx] = signal_value
-		command_handler_write_final_signal(
-			&s.device.command_handler,
-			s.timeline_semaphore,
-			signal_value,
-		)
+		s.device.command_handler.final_signal = {
+			semaphore = s.timeline_semaphore,
+			value     = signal_value,
+		}
 
 		s.frame_idx += 1
 	}
@@ -341,7 +320,8 @@ swapchain_present :: proc(s: ^Swapchain) {
 		"You must call swapchain_acquire_image() before presenting a frame.",
 	)
 
-	_, latest_semaphore := command_handler_get_latest_submission(&s.device.command_handler)
+	ch := &s.device.command_handler
+	latest_semaphore := ch.buffers[ch.latest_submission.buffer_idx].semaphore
 	fmt.assertf(
 		latest_semaphore != 0,
 		"[Swapchain] ASSERT Present called but no GPU work was submitted." +
@@ -356,12 +336,10 @@ swapchain_present :: proc(s: ^Swapchain) {
 		pSwapchains        = &s.swapchain,
 		pImageIndices      = &s.current_image_idx,
 	}
+	// TODO: recreate the swapchain when need_update is set
 	chk_swapchain(vk.QueuePresentKHR(s.device.queues.graphics, &present_info), &s.need_update)
 	s.need_acquire = true
-	s.device.command_handler.latest_submission = {}
-
-	// TODO: handle update
-	if s.need_update do return
+	ch.latest_submission = {}
 }
 
 @(private = "file")

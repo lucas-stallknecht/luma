@@ -15,11 +15,11 @@ Pipeline_Manager :: struct {
 	device:                   ^Device,
 	shader_directory:         string,
 	compile_shader_directory: string,
-	raster_pipelines:         map[string]Raster_Pipeline,
-	compute_pipelines:        map[string]Compute_Pipeline,
+	// heap-allocated, not stored by value. map rehashing must never invalidate
+	// pointers callers hold onto (main.odin keeps these around indefinitely)
+	raster_pipelines:         map[string]^Raster_Pipeline,
+	compute_pipelines:        map[string]^Compute_Pipeline,
 }
-
-MAX_COLOR_ATTACHMENTS :: 4
 
 create_pipeline_manager :: proc(
 	d: ^Device,
@@ -28,22 +28,24 @@ create_pipeline_manager :: proc(
 ) -> Pipeline_Manager {
 	return {
 		device = d,
-		raster_pipelines = make(map[string]Raster_Pipeline),
-		compute_pipelines = make(map[string]Compute_Pipeline),
+		raster_pipelines = make(map[string]^Raster_Pipeline),
+		compute_pipelines = make(map[string]^Compute_Pipeline),
 		shader_directory = shader_directory,
 		compile_shader_directory = compile_shader_directory,
 	}
 }
 
 pipeline_manager_cleanup :: proc(m: ^Pipeline_Manager) {
-	for _, &pipeline in m.raster_pipelines {
-		destroy_raster_pipeline(m.device.device, &pipeline)
+	for _, pipeline in m.raster_pipelines {
+		destroy_raster_pipeline(m.device.device, pipeline)
 		raster_info_free(&pipeline.info)
+		free(pipeline)
 	}
 	delete(m.raster_pipelines)
-	for _, &pipeline in m.compute_pipelines {
-		destroy_compute_pipeline(m.device.device, &pipeline)
+	for _, pipeline in m.compute_pipelines {
+		destroy_compute_pipeline(m.device.device, pipeline)
 		compute_info_free(&pipeline.info)
+		free(pipeline)
 	}
 	delete(m.compute_pipelines)
 }
@@ -51,18 +53,20 @@ pipeline_manager_cleanup :: proc(m: ^Pipeline_Manager) {
 // compiles everything first, only swaps pipelines if it all succeeded -
 // one broken shader shouldn't kill the ones that still work
 pipeline_reload_all :: proc(m: ^Pipeline_Manager) -> bool {
-	raster_entries := make([dynamic]struct {
-			name:     string,
-			vertex:   []u32,
-			fragment: []u32,
-		}, context.temp_allocator)
-	compute_entries := make([dynamic]struct {
-			name: string,
-			code: []u32,
-		}, context.temp_allocator)
+	Raster_Spirv :: struct {
+		name:     string,
+		vertex:   []u32,
+		fragment: []u32,
+	}
+	Compute_Spirv :: struct {
+		name: string,
+		code: []u32,
+	}
+	raster_entries := make([dynamic]Raster_Spirv, context.temp_allocator)
+	compute_entries := make([dynamic]Compute_Spirv, context.temp_allocator)
 
 	all_ok := true
-	for name, &pipeline in m.raster_pipelines {
+	for name, pipeline in m.raster_pipelines {
 		v, v_ok := compile_and_load_spirv(m, pipeline.info.shader, .VERTEX)
 		f, f_ok := compile_and_load_spirv(m, pipeline.info.shader, .FRAGMENT)
 		if !(v_ok && f_ok) {
@@ -70,44 +74,37 @@ pipeline_reload_all :: proc(m: ^Pipeline_Manager) -> bool {
 			// keep compiling the rest so the user gets full diagnostics
 			continue
 		}
-		append(&raster_entries, struct {
-			name:     string,
-			vertex:   []u32,
-			fragment: []u32,
-		}{name = name, vertex = v, fragment = f})
+		append(&raster_entries, Raster_Spirv{name = name, vertex = v, fragment = f})
 	}
-	for name, &pipeline in m.compute_pipelines {
+	for name, pipeline in m.compute_pipelines {
 		c, ok := compile_and_load_spirv(m, pipeline.info.shader, .COMPUTE)
 		if !ok {
 			all_ok = false
 			continue
 		}
-		append(&compute_entries, struct {
-			name: string,
-			code: []u32,
-		}{name = name, code = c})
+		append(&compute_entries, Compute_Spirv{name = name, code = c})
 	}
 
 	if !all_ok do return false
 
 	vk.DeviceWaitIdle(m.device.device)
 	for entry in raster_entries {
-		p := &m.raster_pipelines[entry.name]
+		p := m.raster_pipelines[entry.name]
 		p.cached_spirv.vertex = entry.vertex
 		p.cached_spirv.fragment = entry.fragment
 	}
 	for entry in compute_entries {
-		p := &m.compute_pipelines[entry.name]
+		p := m.compute_pipelines[entry.name]
 		p.cached_spirv = entry.code
 	}
 
-	for _, &pipeline in m.raster_pipelines {
-		destroy_raster_pipeline(m.device.device, &pipeline)
-		create_raster_pipeline(m, &pipeline)
+	for _, pipeline in m.raster_pipelines {
+		destroy_raster_pipeline(m.device.device, pipeline)
+		create_raster_pipeline(m, pipeline)
 	}
-	for _, &pipeline in m.compute_pipelines {
-		destroy_compute_pipeline(m.device.device, &pipeline)
-		create_compute_pipeline(m, &pipeline)
+	for _, pipeline in m.compute_pipelines {
+		destroy_compute_pipeline(m.device.device, pipeline)
+		create_compute_pipeline(m, pipeline)
 	}
 
 	return true
@@ -157,7 +154,7 @@ Raster_Pipeline_Info :: struct {
 	color_attachments:  []struct {
 		format: vk.Format,
 		blend:  Maybe(Blend_Preset),
-	}, // up to MAX_COLOR_ATTACHMENTS
+	},
 	depth_test:         Maybe(Depth_Test),
 	raster:             Rasterizer_Info,
 	push_constant_size: u32,
@@ -174,26 +171,13 @@ pipeline_manager_add_raster :: proc(
 		"pipeline already registered. Use pipeline_reload_all",
 	)
 	info2 := raster_info_clone(info)
-	pipeline := map_insert(
-		&m.raster_pipelines,
-		info2.name,
-		Raster_Pipeline{info = info2, bindless_set = m.device.descriptor_set},
-	)
+	pipeline := new(Raster_Pipeline)
+	pipeline.info = info2
+	pipeline.bindless_set = m.device.descriptor_set
+	m.raster_pipelines[info2.name] = pipeline
 	create_raster_pipeline(m, pipeline)
 
 	return pipeline
-}
-
-pipeline_manager_get_raster :: proc(m: ^Pipeline_Manager, name: string) -> ^Raster_Pipeline {
-	return &m.raster_pipelines[name]
-}
-
-pipeline_manager_remove_raster :: proc(m: ^Pipeline_Manager, name: string) {
-	pipeline, found := &m.raster_pipelines[name]
-	if !found do return
-	destroy_raster_pipeline(m.device.device, pipeline)
-	raster_info_free(&pipeline.info)
-	delete_key(&m.raster_pipelines, name)
 }
 
 bind_raster_pipeline :: proc(cb: vk.CommandBuffer, pipeline: ^Raster_Pipeline) {
@@ -236,20 +220,8 @@ create_raster_pipeline :: proc(m: ^Pipeline_Manager, pipeline: ^Raster_Pipeline)
 		}
 	}
 	stages: [2]vk.PipelineShaderStageCreateInfo
-	push_stage(
-		m.device.device,
-		Shader_Info{byte_code = pipeline.cached_spirv.vertex},
-		.VERTEX,
-		&modules[0],
-		&stages[0],
-	)
-	push_stage(
-		m.device.device,
-		Shader_Info{byte_code = pipeline.cached_spirv.fragment},
-		.FRAGMENT,
-		&modules[1],
-		&stages[1],
-	)
+	push_stage(m.device.device, pipeline.cached_spirv.vertex, .VERTEX, &modules[0], &stages[0])
+	push_stage(m.device.device, pipeline.cached_spirv.fragment, .FRAGMENT, &modules[1], &stages[1])
 
 	// we pull vertices from device address so we don't need to specify vertex bindings
 	vertex_input := vk.PipelineVertexInputStateCreateInfo {
@@ -333,7 +305,6 @@ create_raster_pipeline :: proc(m: ^Pipeline_Manager, pipeline: ^Raster_Pipeline)
 				colorWriteMask      = {.R, .G, .B, .A},
 			}
 		}
-
 	}
 	color_blend_ci := vk.PipelineColorBlendStateCreateInfo {
 		sType           = .PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
@@ -444,30 +415,14 @@ pipeline_manager_add_compute :: proc(
 		"pipeline already registered. Use pipeline_reload_all",
 	)
 	info2 := compute_info_clone(info)
-	pipeline := map_insert(
-		&m.compute_pipelines,
-		info2.name,
-		Compute_Pipeline {
-			info = info2,
-			bindless_set = m.device.descriptor_set,
-			rt_descriptor_set = m.device.rt_descriptor_set if info2.uses_rt else 0,
-		},
-	)
+	pipeline := new(Compute_Pipeline)
+	pipeline.info = info2
+	pipeline.bindless_set = m.device.descriptor_set
+	pipeline.rt_descriptor_set = m.device.rt_descriptor_set if info2.uses_rt else 0
+	m.compute_pipelines[info2.name] = pipeline
 	create_compute_pipeline(m, pipeline)
 
 	return pipeline
-}
-
-pipeline_manager_get_compute :: proc(m: ^Pipeline_Manager, name: string) -> ^Compute_Pipeline {
-	return &m.compute_pipelines[name]
-}
-
-pipeline_manager_remove_compute :: proc(m: ^Pipeline_Manager, name: string) {
-	pipeline, found := &m.compute_pipelines[name]
-	if !found do return
-	destroy_compute_pipeline(m.device.device, pipeline)
-	compute_info_free(&pipeline.info)
-	delete_key(&m.compute_pipelines, name)
 }
 
 bind_compute_pipeline :: proc(cb: vk.CommandBuffer, pipeline: ^Compute_Pipeline) {
@@ -521,13 +476,7 @@ create_compute_pipeline :: proc(m: ^Pipeline_Manager, pipeline: ^Compute_Pipelin
 		vk.DestroyShaderModule(m.device.device, module, nil)
 	}
 	stage: vk.PipelineShaderStageCreateInfo
-	push_stage(
-		m.device.device,
-		Shader_Info{byte_code = pipeline.cached_spirv},
-		.COMPUTE,
-		&module,
-		&stage,
-	)
+	push_stage(m.device.device, pipeline.cached_spirv, .COMPUTE, &module, &stage)
 
 	pc_range := vk.PushConstantRange {
 		stageFlags = {.COMPUTE},
@@ -581,30 +530,25 @@ compute_info_clone :: proc(src: Compute_Pipeline_Info) -> (dst: Compute_Pipeline
 // ────────────────────────────────────────────────────────────────
 // Shader compiling
 
-Shader_Info :: struct {
-	byte_code:   []u32,
-	entry_point: cstring,
-}
-
 @(private = "file")
 push_stage :: proc(
 	device: vk.Device,
-	si: Shader_Info,
+	byte_code: []u32,
 	flag: vk.ShaderStageFlag,
 	module: ^vk.ShaderModule,
 	stage: ^vk.PipelineShaderStageCreateInfo,
 ) {
 	mci := vk.ShaderModuleCreateInfo {
 		sType    = .SHADER_MODULE_CREATE_INFO,
-		codeSize = len(si.byte_code) * size_of(u32),
-		pCode    = raw_data(si.byte_code),
+		codeSize = len(byte_code) * size_of(u32),
+		pCode    = raw_data(byte_code),
 	}
 	chk(vk.CreateShaderModule(device, &mci, nil, module))
 	stage^ = vk.PipelineShaderStageCreateInfo {
 		sType  = .PIPELINE_SHADER_STAGE_CREATE_INFO,
 		stage  = {flag},
 		module = module^,
-		pName  = si.entry_point if si.entry_point != nil else "main",
+		pName  = "main",
 	}
 }
 
@@ -620,26 +564,6 @@ FRAGMENT_DEFINES := [?]string{"-DSTAGE_FRAGMENT", "-Dfrag_main=main"}
 COMPUTE_DEFINES := [?]string{"-DSTAGE_COMPUTE"}
 
 @(private = "file")
-shader_stage_build_flags :: proc(
-	flag: vk.ShaderStageFlag,
-) -> (
-	glslc_stage: string,
-	file_ext: string,
-	defines: []string,
-) {
-	#partial switch flag {
-	case .VERTEX:
-		return "vertex", "vert", VERTEX_DEFINES[:]
-	case .FRAGMENT:
-		return "fragment", "frag", FRAGMENT_DEFINES[:]
-	case .COMPUTE:
-		return "compute", "comp", COMPUTE_DEFINES[:]
-	case:
-		fmt.panicf("Unsupported shader stage", flag)
-	}
-}
-
-@(private = "file")
 compile_and_load_spirv :: proc(
 	m: ^Pipeline_Manager,
 	path: string,
@@ -648,7 +572,18 @@ compile_and_load_spirv :: proc(
 	[]u32,
 	bool,
 ) #optional_ok {
-	glslc_stage, file_ext, defines := shader_stage_build_flags(stage)
+	glslc_stage, file_ext: string
+	defines: []string
+	#partial switch stage {
+	case .VERTEX:
+		glslc_stage, file_ext, defines = "vertex", "vert", VERTEX_DEFINES[:]
+	case .FRAGMENT:
+		glslc_stage, file_ext, defines = "fragment", "frag", FRAGMENT_DEFINES[:]
+	case .COMPUTE:
+		glslc_stage, file_ext, defines = "compute", "comp", COMPUTE_DEFINES[:]
+	case:
+		fmt.panicf("Unsupported shader stage %v", stage)
+	}
 
 	src_path := strings.concatenate({m.shader_directory, path}, context.temp_allocator)
 	stem := filepath.stem(path)

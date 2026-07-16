@@ -26,7 +26,9 @@ Scene :: struct {
 	tlas:                Acceleration_Structure,
 }
 
-Header :: struct {
+// layout of the .bin files produced by tools/blender_export.py,
+// shared by the scene and the GI debug sphere
+Asset_Header :: struct {
 	positions_offset:   u32,
 	positions_size:     u32,
 	normals_offset:     u32,
@@ -90,7 +92,7 @@ section_in_bounds :: proc(data_len: int, offset, size: u32, tag, name: string) -
 }
 
 @(private = "file")
-validate_scene_header :: proc(data: []byte, h: Header) -> bool {
+validate_scene_header :: proc(data: []byte, h: Asset_Header) -> bool {
 	Section :: struct {
 		offset: u32,
 		size:   u32,
@@ -120,12 +122,12 @@ scene_init :: proc(scene: ^Scene, device: ^Device, path: string) -> bool {
 		fmt.eprintln("[Scene] Failed to open", path, ":", err)
 		return false
 	}
-	if len(data) < size_of(Header) {
+	if len(data) < size_of(Asset_Header) {
 		fmt.eprintfln("[Scene] %q is too small to contain a header (%d bytes)", path, len(data))
 		return false
 	}
 
-	header := (^Header)(raw_data(data))^
+	header := (^Asset_Header)(raw_data(data))^
 	if !validate_scene_header(data, header) do return false
 
 	scene.triangle_count = (header.indices_size / size_of(u32)) / 3
@@ -135,7 +137,6 @@ scene_init :: proc(scene: ^Scene, device: ^Device, path: string) -> bool {
 
 	temp_pool := make([dynamic]Buffer, context.temp_allocator)
 
-	// positions + normals + uvs
 	positions_bytes := data[header.positions_offset:header.positions_offset +
 	header.positions_size]
 	positions := slice.reinterpret([]f32, positions_bytes)
@@ -154,57 +155,44 @@ scene_init :: proc(scene: ^Scene, device: ^Device, path: string) -> bool {
 			memory = .GPU_ONLY,
 		},
 	)
-
-	normals_bytes := data[header.normals_offset:header.normals_offset + header.normals_size]
-	normals := slice.reinterpret([]f32, normals_bytes)
 	scene.normal_buffer = create_and_upload_buffer(
 		device,
 		&temp_pool,
 		cb,
-		raw_data(normals),
+		raw_data(data[header.normals_offset:]),
 		{
 			size = vk.DeviceSize(header.normals_size),
 			usage = {.STORAGE_BUFFER, .SHADER_DEVICE_ADDRESS},
 			memory = .GPU_ONLY,
 		},
 	)
-
-	tangents_bytes := data[header.tangents_offset:header.tangents_offset + header.tangents_size]
-	tangents := slice.reinterpret([]f32, tangents_bytes)
 	scene.tangent_buffer = create_and_upload_buffer(
 		device,
 		&temp_pool,
 		cb,
-		raw_data(tangents),
+		raw_data(data[header.tangents_offset:]),
 		{
 			size = vk.DeviceSize(header.tangents_size),
 			usage = {.STORAGE_BUFFER, .SHADER_DEVICE_ADDRESS},
 			memory = .GPU_ONLY,
 		},
 	)
-
-	uvs_bytes := data[header.uvs_offset:header.uvs_offset + header.uvs_size]
-	uvs := slice.reinterpret([]f32, uvs_bytes)
 	scene.uv_buffer = create_and_upload_buffer(
 		device,
 		&temp_pool,
 		cb,
-		raw_data(uvs),
+		raw_data(data[header.uvs_offset:]),
 		{
 			size = vk.DeviceSize(header.uvs_size),
 			usage = {.STORAGE_BUFFER, .SHADER_DEVICE_ADDRESS},
 			memory = .GPU_ONLY,
 		},
 	)
-
-	// indices
-	indices_bytes := data[header.indices_offset:header.indices_offset + header.indices_size]
-	indices := slice.reinterpret([]u32, indices_bytes)
 	scene.index_buffer = create_and_upload_buffer(
 		device,
 		&temp_pool,
 		cb,
-		raw_data(indices),
+		raw_data(data[header.indices_offset:]),
 		{
 			size = vk.DeviceSize(header.indices_size),
 			usage = {
@@ -232,7 +220,6 @@ scene_init :: proc(scene: ^Scene, device: ^Device, path: string) -> bool {
 		}
 	}
 
-	// textures
 	textures_bytes := data[header.textures_offset:header.textures_offset + header.textures_size]
 	textures := parse_textures(string(textures_bytes))
 	defer delete(textures)
@@ -320,7 +307,9 @@ scene_init :: proc(scene: ^Scene, device: ^Device, path: string) -> bool {
 		context.temp_allocator,
 	)
 
-	// position/index buffer uploads above must finish before the BLAS builds below read them
+	// must finish before the BLAS builds read them. AS builds read geometry data
+	// (vertex/index/instance) as SHADER_READ. ACCELERATION_STRUCTURE_READ is only
+	// for reading actual VkAccelerationStructureKHR objects (see the TLAS barrier below)
 	buffer_barriers(
 		cb,
 		{
@@ -328,14 +317,14 @@ scene_init :: proc(scene: ^Scene, device: ^Device, path: string) -> bool {
 			src_stage = {.TRANSFER},
 			src_access = {.TRANSFER_WRITE},
 			dst_stage = {.ACCELERATION_STRUCTURE_BUILD_KHR},
-			dst_access = {.ACCELERATION_STRUCTURE_READ_KHR},
+			dst_access = {.SHADER_READ},
 		},
 		{
 			buffer = &scene.index_buffer,
 			src_stage = {.TRANSFER},
 			src_access = {.TRANSFER_WRITE},
 			dst_stage = {.ACCELERATION_STRUCTURE_BUILD_KHR},
-			dst_access = {.ACCELERATION_STRUCTURE_READ_KHR},
+			dst_access = {.SHADER_READ},
 		},
 	)
 
@@ -395,7 +384,7 @@ scene_init :: proc(scene: ^Scene, device: ^Device, path: string) -> bool {
 			pGeometries   = &blas_geometry,
 		}
 
-		scene.blas[i] = build_acceleration_structure(
+		scene.blas[i] = create_acceleration_structure(
 			device,
 			&temp_pool,
 			cb,
@@ -453,6 +442,7 @@ scene_init :: proc(scene: ^Scene, device: ^Device, path: string) -> bool {
 		},
 	)
 	append(&temp_pool, tlas_instances_buffer)
+	// instance buffer is geometry data too, same SHADER_READ as above
 	buffer_barriers(
 		cb,
 		{
@@ -460,7 +450,7 @@ scene_init :: proc(scene: ^Scene, device: ^Device, path: string) -> bool {
 			src_stage = {.TRANSFER},
 			src_access = {.TRANSFER_WRITE},
 			dst_stage = {.ACCELERATION_STRUCTURE_BUILD_KHR},
-			dst_access = {.ACCELERATION_STRUCTURE_READ_KHR},
+			dst_access = {.SHADER_READ},
 		},
 	)
 	geometry_instances := vk.AccelerationStructureGeometryInstancesDataKHR {
@@ -476,7 +466,8 @@ scene_init :: proc(scene: ^Scene, device: ^Device, path: string) -> bool {
 		primitiveCount = renderable_count,
 	}
 
-	// BLAS builds above must finish before the TLAS build reads them via the instance buffer
+	// BLAS builds must finish before TLAS reads them. this one really is
+	// ACCELERATION_STRUCTURE_READ/WRITE, since it's the AS objects themselves
 	accel_barrier := vk.MemoryBarrier2 {
 		sType         = .MEMORY_BARRIER_2,
 		srcStageMask  = {.ACCELERATION_STRUCTURE_BUILD_KHR},
@@ -499,14 +490,30 @@ scene_init :: proc(scene: ^Scene, device: ^Device, path: string) -> bool {
 		geometryCount = 1,
 		pGeometries   = &tlas_geometry,
 	}
-	scene.tlas = build_acceleration_structure(
+	scene.tlas = create_acceleration_structure(
 		device,
 		&temp_pool,
 		cb,
 		tlas_build_info,
 		tlas_range_info,
 	)
-	write_tlas_descriptor(device, &scene.tlas)
+
+	// expose the TLAS to compute shaders through the rt descriptor set (set = 1)
+	tlas_write := vk.WriteDescriptorSetAccelerationStructureKHR {
+		sType                      = .WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_KHR,
+		accelerationStructureCount = 1,
+		pAccelerationStructures    = &scene.tlas.handle,
+	}
+	tlas_descriptor_write := vk.WriteDescriptorSet {
+		sType           = .WRITE_DESCRIPTOR_SET,
+		pNext           = &tlas_write,
+		dstSet          = device.rt_descriptor_set,
+		dstBinding      = 0,
+		dstArrayElement = 0,
+		descriptorCount = 1,
+		descriptorType  = .ACCELERATION_STRUCTURE_KHR,
+	}
+	vk.UpdateDescriptorSets(device.device, 1, &tlas_descriptor_write, 0, nil)
 
 	command_handler_submit(&device.command_handler, handle, false)
 	command_handler_wait(&device.command_handler, handle)

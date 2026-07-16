@@ -1,8 +1,6 @@
 package luma
 
-import "core:math/bits"
 import vk "vendor:vulkan"
-
 
 Command_Handle :: struct {
 	buffer_idx: u8,
@@ -10,11 +8,9 @@ Command_Handle :: struct {
 }
 
 Command_Buffer :: struct {
-	// allocation
 	buffer:         vk.CommandBuffer,
 	fence:          vk.Fence,
 	semaphore:      vk.Semaphore,
-	// usage
 	current_handle: Command_Handle,
 }
 
@@ -43,7 +39,6 @@ command_handler_init :: proc(
 ) {
 	ch.device = device
 	ch.queue = queue
-	// build command buffers and their associated synch objects
 	command_pool_ci := vk.CommandPoolCreateInfo {
 		sType            = .COMMAND_POOL_CREATE_INFO,
 		flags            = {.RESET_COMMAND_BUFFER, .TRANSIENT},
@@ -96,7 +91,6 @@ command_handler_acquire :: proc(
 	for ch.available_buffer_count == 0 {
 		purge(ch)
 	}
-	// search for the buffer to acquire
 	for &buf, i in ch.buffers {
 		if buf.current_handle.id != 0 do continue
 
@@ -174,44 +168,19 @@ command_handler_submit :: proc(
 
 command_handler_wait :: proc(ch: ^Command_Handler, handle: Command_Handle) {
 	fence := ch.buffers[handle.buffer_idx].fence
-	chk(vk.WaitForFences(ch.device, 1, &fence, true, bits.U64_MAX))
+	chk(vk.WaitForFences(ch.device, 1, &fence, true, max(u64)))
 	purge(ch)
-}
-
-command_handler_request_semaphore_wait :: proc(ch: ^Command_Handler, semaphore: vk.Semaphore) {
-	ch.wait_semaphore = semaphore
-}
-
-command_handler_write_final_signal :: proc(
-	ch: ^Command_Handler,
-	semaphore: vk.Semaphore,
-	timeline_value: u64,
-) {
-	ch.final_signal = {
-		semaphore = semaphore,
-		value     = timeline_value,
-	}
-}
-
-command_handler_get_latest_submission :: proc(
-	ch: ^Command_Handler,
-) -> (
-	Command_Handle,
-	vk.Semaphore,
-) {
-	return ch.latest_submission, ch.buffers[ch.latest_submission.buffer_idx].semaphore
 }
 
 @(private = "file")
 purge :: proc(ch: ^Command_Handler) {
-	// wait a tick for all the buffer fences
+	// checks oldest submission first
 	n_buffers: u8 = len(ch.buffers)
 	for i: u8 = 0; i < n_buffers; i += 1 {
 		idx := (i + ch.latest_submission.buffer_idx + 1) % n_buffers
 		buf := &ch.buffers[idx]
 		if buf.current_handle.id != 0 {
 			fence_res := vk.WaitForFences(ch.device, 1, &buf.fence, true, 0)
-			// buffer is ready, reset and mark available
 			if fence_res == .SUCCESS {
 				vk.ResetCommandBuffer(buf.buffer, nil)
 				vk.ResetFences(ch.device, 1, &buf.fence)

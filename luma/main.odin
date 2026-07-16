@@ -34,6 +34,44 @@ handle_camera_inputs :: proc(win: ^Window, cam: ^Camera, dt: f32) {
 	}
 }
 
+commit_mip :: proc(cb: vk.CommandBuffer, scratch: ^Image, image: ^Image, mip, w, h: u32) {
+	image_barriers(
+		cb,
+		{
+			image = scratch,
+			src_stage = {.COMPUTE_SHADER},
+			src_access = {.SHADER_STORAGE_WRITE},
+			dst_stage = {.TRANSFER},
+			dst_access = {.TRANSFER_READ},
+		},
+		{
+			image = image,
+			src_stage = {.COMPUTE_SHADER, .FRAGMENT_SHADER},
+			src_access = {.SHADER_SAMPLED_READ},
+			dst_stage = {.TRANSFER},
+			dst_access = {.TRANSFER_WRITE},
+		},
+	)
+
+	copy_region := vk.ImageCopy {
+		srcSubresource = {aspectMask = {.COLOR}, layerCount = 1},
+		dstSubresource = {aspectMask = {.COLOR}, mipLevel = mip, layerCount = 1},
+		extent = {w, h, 1},
+	}
+	vk.CmdCopyImage(cb, scratch.image, .GENERAL, image.image, .GENERAL, 1, &copy_region)
+
+	image_barriers(
+		cb,
+		{
+			image = image,
+			src_stage = {.TRANSFER},
+			src_access = {.TRANSFER_WRITE},
+			dst_stage = {.COMPUTE_SHADER, .FRAGMENT_SHADER},
+			dst_access = {.SHADER_SAMPLED_READ},
+		},
+	)
+}
+
 main :: proc() {
 	when ODIN_DEBUG {
 		track: mem.Tracking_Allocator
@@ -151,42 +189,6 @@ main :: proc() {
 		},
 	)
 
-	Bloom_Downsample_Push :: struct {
-		src_texture: u32,
-		src_sampler: u32,
-		src_lod:     f32,
-		dst_image:   u32,
-		dst_width:   u32,
-		dst_height:  u32,
-	}
-	bloom_downsample_pipeline := pipeline_manager_add_compute(
-		&pipeline_manager,
-		{
-			name = "bloom_downsample",
-			shader = "bloom_downsample.glsl",
-			push_constant_size = size_of(Bloom_Downsample_Push),
-		},
-	)
-
-	Bloom_Upsample_Push :: struct {
-		src_texture:   u32,
-		src_sampler:   u32,
-		src_lod:       f32, // coarser mip to tent-sample
-		dst_lod:       f32, // this mip, to fetch the already-downsampled base value
-		dst_image:     u32,
-		dst_width:     u32,
-		dst_height:    u32,
-		filter_radius: f32,
-	}
-	bloom_upsample_pipeline := pipeline_manager_add_compute(
-		&pipeline_manager,
-		{
-			name = "bloom_upsample",
-			shader = "bloom_upsample.glsl",
-			push_constant_size = size_of(Bloom_Upsample_Push),
-		},
-	)
-
 	Probe_Bake_Push :: struct {
 		frame_data:            vk.DeviceAddress,
 		index_buffer:          vk.DeviceAddress,
@@ -229,7 +231,7 @@ main :: proc() {
 	defer free(ui)
 	ui_init(ui, &device, &pipeline_manager, swapchain.format)
 	defer ui_cleanup(ui, &device)
-	window_bind_ui(&window, &ui.ctx)
+	window.ui_ctx = &ui.ctx // forward GLFW input to microui
 
 	camera := create_camera()
 	camera_update_proj(&camera, f32(window.width) / f32(window.height))
@@ -240,7 +242,7 @@ main :: proc() {
 
 	gi: Gi_System
 	defer gi_system_cleanup(&gi, &device)
-	gi_ok := gi_system_init(
+	if !gi_system_init(
 		&gi,
 		&device,
 		"assets/sphere.bin",
@@ -249,8 +251,9 @@ main :: proc() {
 			grid_min = {-12.5, -0.2, -6.1},
 			grid_max = {11.5, 11.0, 5.5},
 		},
-	)
-	if !gi_ok do return
+	) {
+		return
+	}
 
 	visbuffer := create_image(
 		&device,
@@ -321,6 +324,40 @@ main :: proc() {
 
 	// physically based bloom (https://learnopengl.com/Guest-Articles/2022/Phys.-Based-Bloom)
 	// mip 0 = half screen res
+	Bloom_Downsample_Push :: struct {
+		src_texture: u32,
+		src_sampler: u32,
+		src_lod:     f32,
+		dst_image:   u32,
+		dst_width:   u32,
+		dst_height:  u32,
+	}
+	bloom_downsample_pipeline := pipeline_manager_add_compute(
+		&pipeline_manager,
+		{
+			name = "bloom_downsample",
+			shader = "bloom_downsample.glsl",
+			push_constant_size = size_of(Bloom_Downsample_Push),
+		},
+	)
+	Bloom_Upsample_Push :: struct {
+		src_texture:   u32,
+		src_sampler:   u32,
+		src_lod:       f32, // coarser mip to tent-sample
+		dst_lod:       f32, // this mip, to fetch the already-downsampled base value
+		dst_image:     u32,
+		dst_width:     u32,
+		dst_height:    u32,
+		filter_radius: f32,
+	}
+	bloom_upsample_pipeline := pipeline_manager_add_compute(
+		&pipeline_manager,
+		{
+			name = "bloom_upsample",
+			shader = "bloom_upsample.glsl",
+			push_constant_size = size_of(Bloom_Upsample_Push),
+		},
+	)
 	BLOOM_MIP_COUNT :: 4
 	bloom_base_width := max(window.width / 2, 1)
 	bloom_base_height := max(window.height / 2, 1)
@@ -403,24 +440,10 @@ main :: proc() {
 		cloud_noise_speed: f32,
 		sky_cubemap:       u32,
 	}
-	light_dir := glsl.vec3{0.1, 1.0, -0.1}
-	light_color := glsl.vec3{1.0, 1.0, 1.0}
-	light_intensity: f32 = 12.0
-	albedo_boost: f32 = 1.4
-	ssao_radius: f32 = 0.3
-	ssao_pow: f32 = 1.0
-	cirrus: f32 = 0.4
-	cumulus: f32 = 0.8
-	cloud_noise_scale: f32 = 0.7
-	cloud_noise_speed: f32 = 0.1
-	show_probes := false
-	bloom_intensity: f32 = 0.04
-	bloom_filter_radius: f32 = 0.001
 
 	// one buffer per in-flight command buffer slot, so the CPU never overwrites frame
 	// data the GPU hasn't finished reading yet
 	frame_data_buffers: [MAX_COMMAND_BUFFERS]Buffer
-	frame_data_mapped: [MAX_COMMAND_BUFFERS]rawptr
 	for i in 0 ..< int(MAX_COMMAND_BUFFERS) {
 		frame_data_buffers[i] = create_buffer(
 			&device,
@@ -429,14 +452,6 @@ main :: proc() {
 				usage = {.STORAGE_BUFFER, .SHADER_DEVICE_ADDRESS},
 				memory = .CPU_UPLOAD,
 			},
-		)
-		vk.MapMemory(
-			device.device,
-			frame_data_buffers[i].memory,
-			0,
-			vk.DeviceSize(size_of(Frame_Data)),
-			{},
-			&frame_data_mapped[i],
 		)
 	}
 
@@ -455,10 +470,23 @@ main :: proc() {
 		destroy_image(&device, bloom_image)
 		destroy_image(&device, bloom_scratch)
 		for i in 0 ..< int(MAX_COMMAND_BUFFERS) {
-			vk.UnmapMemory(device.device, frame_data_buffers[i].memory)
 			destroy_buffer(&device, &frame_data_buffers[i])
 		}
 	}
+
+	light_dir := glsl.vec3{0.1, 1.0, -0.1}
+	light_color := glsl.vec3{1.0, 1.0, 1.0}
+	light_intensity: f32 = 12.0
+	albedo_boost: f32 = 1.4
+	ssao_radius: f32 = 0.3
+	ssao_pow: f32 = 1.0
+	cirrus: f32 = 0.4
+	cumulus: f32 = 0.8
+	cloud_noise_scale: f32 = 0.7
+	cloud_noise_speed: f32 = 0.1
+	show_probes := false
+	bloom_intensity: f32 = 0.04
+	bloom_filter_radius: f32 = 0.001
 
 	BAKE_INTERVAL :: 1.0 / 30.0
 
@@ -488,7 +516,7 @@ main :: proc() {
 
 		if window.resized {
 			camera_update_proj(&camera, f32(window.width) / f32(window.height))
-			// TODO: resize other things
+			// TODO: resize the swapchain and size-dependent images
 			window.resized = false
 		}
 
@@ -597,7 +625,7 @@ main :: proc() {
 			sky_cubemap       = sky_cubemap.bindless_idx,
 		}
 		frame_data_buffer := &frame_data_buffers[handle.buffer_idx]
-		mem.copy(frame_data_mapped[handle.buffer_idx], &frame_data, size_of(Frame_Data))
+		mem.copy(frame_data_buffer.mapped, &frame_data, size_of(Frame_Data))
 
 		// bake the sky into a cubemap
 		// this avoids having to recompute it for each GI probe ray
@@ -696,8 +724,8 @@ main :: proc() {
 			},
 			{
 				image = &depth_image,
-				dst_stage = {.LATE_FRAGMENT_TESTS},
-				dst_access = {.DEPTH_STENCIL_ATTACHMENT_WRITE},
+				dst_stage = {.EARLY_FRAGMENT_TESTS, .LATE_FRAGMENT_TESTS},
+				dst_access = {.DEPTH_STENCIL_ATTACHMENT_READ, .DEPTH_STENCIL_ATTACHMENT_WRITE},
 			},
 			{
 				image = &draw_image,
@@ -724,7 +752,7 @@ main :: proc() {
 			clearValue = {depthStencil = {depth = 1.0}},
 		}
 		render_area := vk.Rect2D {
-			extent = {width = u32(width), height = u32(height)},
+			extent = {width = width, height = height},
 		}
 		rendering_info := vk.RenderingInfo {
 			sType                = .RENDERING_INFO,
@@ -808,7 +836,7 @@ main :: proc() {
 			&shading_pc,
 		)
 		bind_compute_pipeline(cb, shading_pipeline)
-		vk.CmdDispatch(cb, (window.width + 7) / 8, (window.height + 7) / 8, 1)
+		vk.CmdDispatch(cb, (width + 7) / 8, (height + 7) / 8, 1)
 
 		image_barriers(
 			cb,
@@ -865,49 +893,7 @@ main :: proc() {
 			)
 			vk.CmdDispatch(cb, (w + 7) / 8, (h + 7) / 8, 1)
 
-			image_barriers(
-				cb,
-				{
-					image = &bloom_scratch,
-					src_stage = {.COMPUTE_SHADER},
-					src_access = {.SHADER_STORAGE_WRITE},
-					dst_stage = {.TRANSFER},
-					dst_access = {.TRANSFER_READ},
-				},
-				{
-					image = &bloom_image,
-					src_stage = {.COMPUTE_SHADER, .FRAGMENT_SHADER},
-					src_access = {.SHADER_SAMPLED_READ},
-					dst_stage = {.TRANSFER},
-					dst_access = {.TRANSFER_WRITE},
-				},
-			)
-
-			bloom_copy_region := vk.ImageCopy {
-				srcSubresource = {aspectMask = {.COLOR}, layerCount = 1},
-				dstSubresource = {aspectMask = {.COLOR}, mipLevel = i, layerCount = 1},
-				extent = {w, h, 1},
-			}
-			vk.CmdCopyImage(
-				cb,
-				bloom_scratch.image,
-				.GENERAL,
-				bloom_image.image,
-				.GENERAL,
-				1,
-				&bloom_copy_region,
-			)
-
-			image_barriers(
-				cb,
-				{
-					image = &bloom_image,
-					src_stage = {.TRANSFER},
-					src_access = {.TRANSFER_WRITE},
-					dst_stage = {.COMPUTE_SHADER, .FRAGMENT_SHADER},
-					dst_access = {.SHADER_SAMPLED_READ},
-				},
-			)
+			commit_mip(cb, &bloom_scratch, &bloom_image, i, w, h)
 		}
 
 		bind_compute_pipeline(cb, bloom_upsample_pipeline)
@@ -946,49 +932,7 @@ main :: proc() {
 			)
 			vk.CmdDispatch(cb, (w + 7) / 8, (h + 7) / 8, 1)
 
-			image_barriers(
-				cb,
-				{
-					image = &bloom_scratch,
-					src_stage = {.COMPUTE_SHADER},
-					src_access = {.SHADER_STORAGE_WRITE},
-					dst_stage = {.TRANSFER},
-					dst_access = {.TRANSFER_READ},
-				},
-				{
-					image = &bloom_image,
-					src_stage = {.COMPUTE_SHADER, .FRAGMENT_SHADER},
-					src_access = {.SHADER_SAMPLED_READ},
-					dst_stage = {.TRANSFER},
-					dst_access = {.TRANSFER_WRITE},
-				},
-			)
-
-			bloom_copy_region := vk.ImageCopy {
-				srcSubresource = {aspectMask = {.COLOR}, layerCount = 1},
-				dstSubresource = {aspectMask = {.COLOR}, mipLevel = u32(i), layerCount = 1},
-				extent = {w, h, 1},
-			}
-			vk.CmdCopyImage(
-				cb,
-				bloom_scratch.image,
-				.GENERAL,
-				bloom_image.image,
-				.GENERAL,
-				1,
-				&bloom_copy_region,
-			)
-
-			image_barriers(
-				cb,
-				{
-					image = &bloom_image,
-					src_stage = {.TRANSFER},
-					src_access = {.TRANSFER_WRITE},
-					dst_stage = {.COMPUTE_SHADER, .FRAGMENT_SHADER},
-					dst_access = {.SHADER_SAMPLED_READ},
-				},
-			)
+			commit_mip(cb, &bloom_scratch, &bloom_image, u32(i), w, h)
 		}
 
 		// render a fullscreen triangle that samples the draw image and apply tonemapping
@@ -1072,5 +1016,4 @@ main :: proc() {
 
 	vk.DeviceWaitIdle(device.device)
 	fmt.println("Shutting down")
-	return
 }

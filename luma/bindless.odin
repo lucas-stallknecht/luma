@@ -3,9 +3,11 @@ package luma
 import "core:fmt"
 import vk "vendor:vulkan"
 
-// one descriptor set for the whole renderer
-//
-// register a resource once, get back an index, and just pass that index around in push constants
+
+// one descriptor set for the whole renderer: register a resource once, get an
+// index back, and pass that index around in push constants instead of binding sets
+
+
 MAX_BINDLESS_IMAGES :: 100
 MAX_SAMPLERS :: 5
 MAX_CUBE_TEXTURES :: 1
@@ -130,8 +132,9 @@ bindless_register_storage_image :: proc(d: ^Device, view: vk.ImageView, format: 
 	return slot
 }
 
-// pair this with a sampler index and you get a usable texture in the shader
 bindless_register_texture :: proc(d: ^Device, view: vk.ImageView) -> u32 {
+	// pair this with a sampler index and you get a usable texture in the shader
+
 	slot := d.bindless_next.texture
 	d.bindless_next.texture += 1
 	info := vk.DescriptorImageInfo {
@@ -171,8 +174,9 @@ bindless_register_texture_cube :: proc(d: ^Device, view: vk.ImageView) -> u32 {
 	return slot
 }
 
-// covering every layer
 bindless_register_storage_image_array :: proc(d: ^Device, view: vk.ImageView) -> u32 {
+	// view must be a D2_ARRAY covering every layer, unlike the per-image slots above
+
 	slot := d.bindless_next.storage_f32_array
 	d.bindless_next.storage_f32_array += 1
 	info := vk.DescriptorImageInfo {

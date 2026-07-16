@@ -25,7 +25,6 @@ Ui :: struct {
 	sampler:        vk.Sampler,
 	sampler_idx:    u32,
 	vertex_buffers: [MAX_COMMAND_BUFFERS]Buffer,
-	vertex_mapped:  [MAX_COMMAND_BUFFERS]rawptr,
 	pipeline:       ^Raster_Pipeline,
 }
 
@@ -85,14 +84,6 @@ ui_init :: proc(
 				memory = .CPU_UPLOAD,
 			},
 		)
-		vk.MapMemory(
-			device.device,
-			ui.vertex_buffers[i].memory,
-			0,
-			vk.DeviceSize(UI_MAX_VERTICES * size_of(Ui_Vertex)),
-			{},
-			&ui.vertex_mapped[i],
-		)
 	}
 
 	ui.pipeline = pipeline_manager_add_raster(
@@ -109,7 +100,6 @@ ui_init :: proc(
 
 ui_cleanup :: proc(ui: ^Ui, device: ^Device) {
 	for i in 0 ..< int(MAX_COMMAND_BUFFERS) {
-		vk.UnmapMemory(device.device, ui.vertex_buffers[i].memory)
 		destroy_buffer(device, &ui.vertex_buffers[i])
 	}
 	destroy_image(device, ui.atlas_image)
@@ -195,7 +185,7 @@ ui_push_quad :: proc(
 
 // call after mu.end(&ui.ctx), inside an active render pass
 ui_render :: proc(ui: ^Ui, cb: vk.CommandBuffer, buffer_idx: u8, width, height: u32) {
-	verts := (^[UI_MAX_VERTICES]Ui_Vertex)(ui.vertex_mapped[buffer_idx])
+	verts := (^[UI_MAX_VERTICES]Ui_Vertex)(ui.vertex_buffers[buffer_idx].mapped)
 	vertex_count: u32 = 0
 
 	batches := make([dynamic]Ui_Batch, context.temp_allocator)

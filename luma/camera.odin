@@ -36,7 +36,7 @@ camera_update_proj :: proc(cam: ^Camera, aspect_ratio: f32) {
 		cam.far,
 		true, // reversed-z
 	)
-	// vulkan specific
+	// Vulkan's clip space has Y pointing down, unlike OpenGL
 	cam.proj[1][1] *= -1.0
 }
 
@@ -74,10 +74,9 @@ camera_rotate :: proc(cam: ^Camera, delta: glsl.vec2) {
 	yaw := -delta.x * (cam.look_sensitivity * 0.01)
 	pitch := -delta.y * (cam.look_sensitivity * 0.01)
 
-	// world up
+	// yaw around world up, pitch around local right, to avoid roll
 	yaw_quat := la.quaternion_angle_axis_f32(yaw, glsl.vec3{0.0, 1.0, 0.0})
 	cam.rotation = yaw_quat * cam.rotation
-	// local right
 	pitch_quat := la.quaternion_angle_axis_f32(pitch, camera_get_right(cam))
 	cam.rotation = pitch_quat * cam.rotation
 

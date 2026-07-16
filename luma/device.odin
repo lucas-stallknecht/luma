@@ -14,26 +14,25 @@ chk :: proc(result: vk.Result, location := #caller_location) {
 // Vulkan Context
 
 Device :: struct {
-	instance:                vk.Instance,
-	physical_device:         vk.PhysicalDevice,
-	rt_properties:           vk.PhysicalDeviceRayTracingPipelinePropertiesKHR,
-	accel_properties:        vk.PhysicalDeviceAccelerationStructurePropertiesKHR,
-	queues:                  struct {
+	instance:             vk.Instance,
+	physical_device:      vk.PhysicalDevice,
+	rt_properties:        vk.PhysicalDeviceRayTracingPipelinePropertiesKHR,
+	accel_properties:     vk.PhysicalDeviceAccelerationStructurePropertiesKHR,
+	queues:               struct {
 		graphics:            vk.Queue,
 		graphics_family_idx: u32,
 		compute:             vk.Queue,
 		compute_family_idx:  u32,
 	},
-	device:                  vk.Device,
-	memory_properties:       vk.PhysicalDeviceMemoryProperties,
-	available_depth_formats: [dynamic]vk.Format,
-	descriptor_pool:         vk.DescriptorPool,
-	descriptor_layout:       vk.DescriptorSetLayout,
-	descriptor_set:          vk.DescriptorSet,
-	rt_descriptor_layout:    vk.DescriptorSetLayout,
-	rt_descriptor_set:       vk.DescriptorSet,
-	command_handler:         Command_Handler,
-	bindless_next:           struct {
+	device:               vk.Device,
+	memory_properties:    vk.PhysicalDeviceMemoryProperties,
+	descriptor_pool:      vk.DescriptorPool,
+	descriptor_layout:    vk.DescriptorSetLayout,
+	descriptor_set:       vk.DescriptorSet,
+	rt_descriptor_layout: vk.DescriptorSetLayout,
+	rt_descriptor_set:    vk.DescriptorSet,
+	command_handler:      Command_Handler,
+	bindless_next:        struct {
 		sampler:           u32,
 		texture:           u32,
 		texture_cube:      u32,
@@ -59,7 +58,6 @@ Device_Desc :: struct {
 }
 
 device_init :: proc(d: ^Device, desc: Device_Desc) {
-	// instance
 	{
 		vk.load_proc_addresses_global(rawptr(glfw.GetInstanceProcAddress))
 		glfw_extensions := glfw.GetRequiredInstanceExtensions()
@@ -74,11 +72,14 @@ device_init :: proc(d: ^Device, desc: Device_Desc) {
 			pApplicationInfo = &{sType = .APPLICATION_INFO, apiVersion = vk.API_VERSION_1_3},
 		}
 		if desc.enable_validation {
-			debug_printf_feature := vk.ValidationFeatureEnableEXT.DEBUG_PRINTF
+			enabled_features := [?]vk.ValidationFeatureEnableEXT {
+				.DEBUG_PRINTF,
+				.SYNCHRONIZATION_VALIDATION,
+			}
 			validation_features := vk.ValidationFeaturesEXT {
 				sType                         = .VALIDATION_FEATURES_EXT,
-				enabledValidationFeatureCount = 1,
-				pEnabledValidationFeatures    = &debug_printf_feature,
+				enabledValidationFeatureCount = len(enabled_features),
+				pEnabledValidationFeatures    = raw_data(&enabled_features),
 			}
 			instance_ci.enabledLayerCount = u32(len(layers))
 			instance_ci.ppEnabledLayerNames = raw_data(&layers)
@@ -97,7 +98,6 @@ device_init :: proc(d: ^Device, desc: Device_Desc) {
 		if vk.EnumeratePhysicalDevices == nil do fmt.panicf("[Device] Failed to load instance functions")
 	}
 
-	// physical device
 	{
 		physical_device_count: u32
 		chk(vk.EnumeratePhysicalDevices(d.instance, &physical_device_count, nil))
@@ -140,7 +140,6 @@ device_init :: proc(d: ^Device, desc: Device_Desc) {
 		vk.GetPhysicalDeviceMemoryProperties(d.physical_device, &d.memory_properties)
 	}
 
-	// queues
 	{
 		queue_family_count: u32
 		vk.GetPhysicalDeviceQueueFamilyProperties(d.physical_device, &queue_family_count, nil)
@@ -165,7 +164,6 @@ device_init :: proc(d: ^Device, desc: Device_Desc) {
 		}
 	}
 
-	// logical device
 	{
 		queue_priority: f32 = 1.0
 		queue_ci := [?]vk.DeviceQueueCreateInfo {
@@ -285,10 +283,9 @@ device_init :: proc(d: ^Device, desc: Device_Desc) {
 	}
 	chk(vk.CreateDescriptorPool(d.device, &desc_pool_ci, nil, &d.descriptor_pool))
 
-	// bindless descriptors
 	bindless_init(d)
 
-	// raytracing descriptors
+	// TLAS lives in its own set (1), separate from the bindless one (0)
 	rt_desc_layout_bindings := [?]vk.DescriptorSetLayoutBinding {
 		{
 			binding = 0,
@@ -319,7 +316,6 @@ device_cleanup :: proc(d: ^Device) {
 	vk.DestroyDescriptorSetLayout(d.device, d.rt_descriptor_layout, nil)
 	command_handler_cleanup(&d.command_handler)
 	bindless_cleanup(d)
-	delete(d.available_depth_formats)
 	vk.DestroyDevice(d.device, nil)
 	vk.DestroyInstance(d.instance, nil)
 }
@@ -330,7 +326,6 @@ device_cleanup :: proc(d: ^Device) {
 Memory_Preset :: enum {
 	GPU_ONLY,
 	CPU_UPLOAD,
-	CPU_READBACK,
 }
 
 get_memory_flags :: proc(p: Memory_Preset) -> vk.MemoryPropertyFlags {
@@ -338,8 +333,6 @@ get_memory_flags :: proc(p: Memory_Preset) -> vk.MemoryPropertyFlags {
 	case .GPU_ONLY:
 		return {.DEVICE_LOCAL}
 	case .CPU_UPLOAD:
-		return {.HOST_VISIBLE, .HOST_COHERENT}
-	case .CPU_READBACK:
 		return {.HOST_VISIBLE, .HOST_COHERENT}
 	}
 	return {.DEVICE_LOCAL}
@@ -353,7 +346,7 @@ find_memory_type :: proc(
 	mem_properties := device.memory_properties
 	for i in 0 ..< mem_properties.memoryTypeCount {
 		if (type_filter & (1 << i) != 0) &&
-		   (properties & mem_properties.memoryTypes[i].propertyFlags) == properties { 	// memory type is suitable
+		   (properties & mem_properties.memoryTypes[i].propertyFlags) == properties {
 			return i
 		}
 	}
