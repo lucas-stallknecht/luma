@@ -1,9 +1,9 @@
 package luma
 
+import imgui "../imgui"
 import "core:fmt"
 import "core:math/linalg/glsl"
 import "core:mem"
-import imgui "../imgui"
 import "vendor:glfw"
 import vk "vendor:vulkan"
 
@@ -32,44 +32,6 @@ handle_camera_inputs :: proc(win: ^Window, cam: ^Camera, dt: f32) {
 	if win.pressed_keys[glfw.KEY_LEFT_CONTROL] {
 		camera_move_up(cam, -dt)
 	}
-}
-
-commit_mip :: proc(cb: vk.CommandBuffer, scratch: ^Image, image: ^Image, mip, w, h: u32) {
-	image_barriers(
-		cb,
-		{
-			image = scratch,
-			src_stage = {.COMPUTE_SHADER},
-			src_access = {.SHADER_STORAGE_WRITE},
-			dst_stage = {.TRANSFER},
-			dst_access = {.TRANSFER_READ},
-		},
-		{
-			image = image,
-			src_stage = {.COMPUTE_SHADER, .FRAGMENT_SHADER},
-			src_access = {.SHADER_SAMPLED_READ},
-			dst_stage = {.TRANSFER},
-			dst_access = {.TRANSFER_WRITE},
-		},
-	)
-
-	copy_region := vk.ImageCopy {
-		srcSubresource = {aspectMask = {.COLOR}, layerCount = 1},
-		dstSubresource = {aspectMask = {.COLOR}, mipLevel = mip, layerCount = 1},
-		extent = {w, h, 1},
-	}
-	vk.CmdCopyImage(cb, scratch.image, .GENERAL, image.image, .GENERAL, 1, &copy_region)
-
-	image_barriers(
-		cb,
-		{
-			image = image,
-			src_stage = {.TRANSFER},
-			src_access = {.TRANSFER_WRITE},
-			dst_stage = {.COMPUTE_SHADER, .FRAGMENT_SHADER},
-			dst_access = {.SHADER_SAMPLED_READ},
-		},
-	)
 }
 
 main :: proc() {
@@ -106,138 +68,14 @@ main :: proc() {
 	)
 	defer swapchain_cleanup(&swapchain)
 
-	pipeline_manager := create_pipeline_manager(&device, "shaders/", "shaders/compiled/")
-	defer pipeline_manager_cleanup(&pipeline_manager)
-
-	Visbuffer_Push :: struct {
-		frame_data:       vk.DeviceAddress,
-		vertex_buffer:    vk.DeviceAddress,
-		draw_data_buffer: vk.DeviceAddress,
-		uv_buffer:        vk.DeviceAddress,
-		material_buffer:  vk.DeviceAddress,
-	}
-	visbuffer_pipeline := pipeline_manager_add_raster(
-		&pipeline_manager,
-		{
-			name = "visbuffer",
-			shader = "visbuffer.glsl",
-			raster = {primitive_topology = .TRIANGLE_LIST, front_face = .CLOCKWISE},
-			push_constant_size = size_of(Visbuffer_Push),
-			color_attachments = {{format = .R32G32_UINT}},
-			depth_test = Depth_Test {
-				enable_depth_write = true,
-				compare_op = .LESS_OR_EQUAL,
-				format = .D32_SFLOAT,
-			},
-		},
-	)
-
-	Probe_Debug_Push :: struct {
-		frame_data:            vk.DeviceAddress,
-		vertex_buffer:         vk.DeviceAddress,
-		normal_buffer:         vk.DeviceAddress,
-		probe_position_buffer: vk.DeviceAddress,
-		probe_sh_buffer:       vk.DeviceAddress,
-	}
-	probe_debug_pipeline := pipeline_manager_add_raster(
-		&pipeline_manager,
-		{
-			name = "probe_debug",
-			shader = "probe_debug.glsl",
-			raster = {primitive_topology = .TRIANGLE_LIST, front_face = .CLOCKWISE},
-			push_constant_size = size_of(Probe_Debug_Push),
-			color_attachments = {{format = swapchain.format}},
-			depth_test = Depth_Test {
-				enable_depth_write = true,
-				compare_op = .LESS_OR_EQUAL,
-				format = .D32_SFLOAT,
-			},
-		},
-	)
-
-	SKY_CUBEMAP_FACES :: 6
-	Sky_Bake_Push :: struct {
-		frame_data:    vk.DeviceAddress,
-		cubemap_image: u32,
-	}
-	sky_bake_pipeline := pipeline_manager_add_compute(
-		&pipeline_manager,
-		{name = "sky_bake", shader = "sky_bake.glsl", push_constant_size = size_of(Sky_Bake_Push)},
-	)
-
-	Shading_Push :: struct {
-		frame_data:            vk.DeviceAddress,
-		visbuffer:             u32,
-		draw_image:            u32,
-		index_buffer:          vk.DeviceAddress,
-		vertex_buffer:         vk.DeviceAddress,
-		draw_data_buffer:      vk.DeviceAddress,
-		normal_buffer:         vk.DeviceAddress,
-		tangent_buffer:        vk.DeviceAddress,
-		uv_buffer:             vk.DeviceAddress,
-		material_buffer:       vk.DeviceAddress,
-		probe_sh_buffer:       vk.DeviceAddress,
-		probe_position_buffer: vk.DeviceAddress,
-	}
-	shading_pipeline := pipeline_manager_add_compute(
-		&pipeline_manager,
-		{
-			name = "shading",
-			shader = "shading.glsl",
-			push_constant_size = size_of(Shading_Push),
-			uses_rt = true,
-		},
-	)
-
-	Probe_Bake_Push :: struct {
-		frame_data:            vk.DeviceAddress,
-		index_buffer:          vk.DeviceAddress,
-		normal_buffer:         vk.DeviceAddress,
-		uv_buffer:             vk.DeviceAddress,
-		draw_data_buffer:      vk.DeviceAddress,
-		material_buffer:       vk.DeviceAddress,
-		probe_position_buffer: vk.DeviceAddress,
-		probe_sh_buffer:       vk.DeviceAddress,
-	}
-	probe_bake_pipeline := pipeline_manager_add_compute(
-		&pipeline_manager,
-		{
-			name = "probe_bake",
-			shader = "probe_bake.glsl",
-			push_constant_size = size_of(Probe_Bake_Push),
-			uses_rt = true,
-		},
-	)
-
-	Present_Push :: struct {
-		draw_image:      u32,
-		bloom_texture:   u32,
-		bloom_sampler:   u32,
-		bloom_intensity: f32,
-	}
-	present_pipeline := pipeline_manager_add_raster(
-		&pipeline_manager,
-		{
-			name = "visbuffer_present",
-			shader = "present.glsl",
-			raster = {primitive_topology = .TRIANGLE_LIST},
-			push_constant_size = size_of(Present_Push),
-			color_attachments = {{format = swapchain.format}},
-		},
-	)
-
 	ui_init(&device, &window, &swapchain)
 	defer ui_cleanup()
 
-	camera := create_default_camera()
-	camera_update_proj(&camera, f32(window.width) / f32(window.height))
-
 	scene: Scene
-	defer scene_cleanup(&scene, &device)
 	if !scene_init(&scene, &device, "assets/crytek_sponza/scene.bin") do return
+	defer scene_cleanup(&scene, &device)
 
 	gi: Gi_System
-	defer gi_system_cleanup(&gi, &device)
 	if !gi_system_init(
 		&gi,
 		&device,
@@ -250,236 +88,14 @@ main :: proc() {
 	) {
 		return
 	}
+	defer gi_system_cleanup(&gi, &device)
 
-	init_handle, init_cb := command_handler_acquire(&device.command_handler)
+	rd: Renderer
+	if !renderer_init(&rd, &device, &window, &swapchain) do return
+	defer renderer_cleanup(&rd)
 
-	visbuffer := create_image(
-		&device,
-		init_cb,
-		{
-			width = window.width,
-			height = window.height,
-			format = .R32G32_UINT,
-			usage = {.COLOR_ATTACHMENT, .TRANSFER_SRC, .STORAGE},
-			memory = .GPU_ONLY,
-			register_bindless = .Storage,
-		},
-	)
-	draw_image := create_image(
-		&device,
-		init_cb,
-		{
-			width = window.width,
-			height = window.height,
-			format = .R32G32B32A32_SFLOAT,
-			usage = {.TRANSFER_SRC, .STORAGE, .SAMPLED},
-			memory = .GPU_ONLY,
-			register_bindless = .Storage,
-		},
-	)
-	draw_image_tex_idx := bindless_register_texture(&device, draw_image.view)
-
-	depth_image := create_image(
-		&device,
-		init_cb,
-		{
-			width = window.width,
-			height = window.height,
-			format = .D32_SFLOAT,
-			usage = {.DEPTH_STENCIL_ATTACHMENT},
-			memory = .GPU_ONLY,
-		},
-	)
-
-	// sky, baked into a small cubemap once a frame and sampled by shading + GI probe bake
-	SKY_CUBEMAP_SIZE :: 256
-	sky_cubemap := create_image(
-		&device,
-		init_cb,
-		{
-			width = SKY_CUBEMAP_SIZE,
-			height = SKY_CUBEMAP_SIZE,
-			format = .R32G32B32A32_SFLOAT,
-			usage = {.STORAGE, .SAMPLED},
-			memory = .GPU_ONLY,
-			array_layers = 6,
-			register_bindless = .TextureCube,
-		},
-	)
-	sky_cubemap_array_view_ci := vk.ImageViewCreateInfo {
-		sType = .IMAGE_VIEW_CREATE_INFO,
-		image = sky_cubemap.image,
-		viewType = .D2_ARRAY,
-		format = sky_cubemap.format,
-		subresourceRange = {aspectMask = {.COLOR}, layerCount = 6, levelCount = 1},
-	}
-	sky_cubemap_array_view: vk.ImageView
-	chk(
-		vk.CreateImageView(
-			device.device,
-			&sky_cubemap_array_view_ci,
-			nil,
-			&sky_cubemap_array_view,
-		),
-	)
-	sky_cubemap_array_idx := bindless_register_storage_image_array(&device, sky_cubemap_array_view)
-
-	// physically based bloom (https://learnopengl.com/Guest-Articles/2022/Phys.-Based-Bloom)
-	// mip 0 = half screen res
-	Bloom_Downsample_Push :: struct {
-		src_texture: u32,
-		src_sampler: u32,
-		src_lod:     f32,
-		dst_image:   u32,
-		dst_width:   u32,
-		dst_height:  u32,
-	}
-	bloom_downsample_pipeline := pipeline_manager_add_compute(
-		&pipeline_manager,
-		{
-			name = "bloom_downsample",
-			shader = "bloom_downsample.glsl",
-			push_constant_size = size_of(Bloom_Downsample_Push),
-		},
-	)
-	Bloom_Upsample_Push :: struct {
-		src_texture:   u32,
-		src_sampler:   u32,
-		src_lod:       f32, // coarser mip to tent-sample
-		dst_lod:       f32, // this mip, to fetch the already-downsampled base value
-		dst_image:     u32,
-		dst_width:     u32,
-		dst_height:    u32,
-		filter_radius: f32,
-	}
-	bloom_upsample_pipeline := pipeline_manager_add_compute(
-		&pipeline_manager,
-		{
-			name = "bloom_upsample",
-			shader = "bloom_upsample.glsl",
-			push_constant_size = size_of(Bloom_Upsample_Push),
-		},
-	)
-	BLOOM_MIP_COUNT :: 4
-	bloom_base_width := max(window.width / 2, 1)
-	bloom_base_height := max(window.height / 2, 1)
-	bloom_image := create_image(
-		&device,
-		init_cb,
-		{
-			width = bloom_base_width,
-			height = bloom_base_height,
-			format = .R32G32B32A32_SFLOAT,
-			usage = {.SAMPLED, .TRANSFER_DST},
-			memory = .GPU_ONLY,
-			register_bindless = .Texture,
-			mips = true,
-		},
-	)
-	bloom_mip_count := min(bloom_image.mip_levels, BLOOM_MIP_COUNT)
-	bloom_scratch := create_image(
-		&device,
-		init_cb,
-		{
-			width = bloom_base_width,
-			height = bloom_base_height,
-			format = .R32G32B32A32_SFLOAT,
-			usage = {.STORAGE, .TRANSFER_SRC},
-			memory = .GPU_ONLY,
-			register_bindless = .Storage,
-		},
-	)
-
-	command_handler_submit(&device.command_handler, init_handle, false)
-	command_handler_wait(&device.command_handler, init_handle)
-
-	texture_sampler: vk.Sampler
-	texture_sampler_ci := vk.SamplerCreateInfo {
-		sType        = .SAMPLER_CREATE_INFO,
-		magFilter    = .LINEAR,
-		minFilter    = .LINEAR,
-		addressModeU = .REPEAT,
-		addressModeV = .REPEAT,
-		addressModeW = .REPEAT,
-		mipLodBias   = -0.5,
-		minLod       = 0.0,
-		maxLod       = vk.LOD_CLAMP_NONE,
-		borderColor  = .INT_OPAQUE_BLACK,
-	}
-	chk(vk.CreateSampler(device.device, &texture_sampler_ci, nil, &texture_sampler))
-	texture_sampler_idx := bindless_register_sampler(&device, texture_sampler)
-
-	bloom_sampler: vk.Sampler
-	bloom_sampler_ci := vk.SamplerCreateInfo {
-		sType        = .SAMPLER_CREATE_INFO,
-		magFilter    = .LINEAR,
-		minFilter    = .LINEAR,
-		addressModeU = .CLAMP_TO_EDGE,
-		addressModeV = .CLAMP_TO_EDGE,
-		addressModeW = .CLAMP_TO_EDGE,
-		minLod       = 0.0,
-		maxLod       = vk.LOD_CLAMP_NONE,
-		borderColor  = .INT_OPAQUE_BLACK,
-	}
-	chk(vk.CreateSampler(device.device, &bloom_sampler_ci, nil, &bloom_sampler))
-	bloom_sampler_idx := bindless_register_sampler(&device, bloom_sampler)
-
-	Frame_Data :: struct {
-		proj_view:         glsl.mat4,
-		inv_proj_view:     glsl.mat4,
-		camera_position:   glsl.vec3,
-		texture_sampler:   u32,
-		light_dir:         glsl.vec3,
-		albedo_boost:      f32,
-		light_color:       glsl.vec3,
-		light_intensity:   f32,
-		grid_min:          glsl.vec3,
-		probe_count:       u32,
-		grid_spacing:      glsl.vec3,
-		frame_idx:         u32,
-		probe_counts:      [3]u32,
-		ssao_pow:          f32,
-		ssao_radius:       f32,
-		time:              f32,
-		cirrus:            f32,
-		cumulus:           f32,
-		cloud_noise_scale: f32,
-		cloud_noise_speed: f32,
-		sky_cubemap:       u32,
-	}
-
-	// one buffer per in-flight command buffer slot, so the CPU never overwrites frame
-	// data the GPU hasn't finished reading yet
-	frame_data_buffers: [MAX_COMMAND_BUFFERS]Buffer
-	for i in 0 ..< int(MAX_COMMAND_BUFFERS) {
-		frame_data_buffers[i] = create_buffer(
-			&device,
-			{
-				size = size_of(Frame_Data),
-				usage = {.STORAGE_BUFFER, .SHADER_DEVICE_ADDRESS},
-				memory = .CPU_UPLOAD,
-			},
-		)
-	}
-
-	defer {
-		if texture_sampler != 0 {
-			vk.DestroySampler(device.device, texture_sampler, nil)
-		}
-		if bloom_sampler != 0 {
-			vk.DestroySampler(device.device, bloom_sampler, nil)
-		}
-		destroy_image(&device, visbuffer)
-		destroy_image(&device, draw_image)
-		destroy_image(&device, depth_image)
-		destroy_image(&device, sky_cubemap)
-		vk.DestroyImageView(device.device, sky_cubemap_array_view, nil)
-		destroy_image(&device, bloom_image)
-		destroy_image(&device, bloom_scratch)
-		for i in 0 ..< int(MAX_COMMAND_BUFFERS) {
-			destroy_buffer(&device, &frame_data_buffers[i])
-		}
-	}
+	camera := create_default_camera()
+	camera_update_proj(&camera, f32(window.width) / f32(window.height))
 
 	light_dir := glsl.vec3{0.1, 1.0, -0.1}
 	light_color := glsl.vec3{1.0, 1.0, 1.0}
@@ -494,8 +110,6 @@ main :: proc() {
 	show_probes := false
 	bloom_intensity: f32 = 0.04
 	bloom_filter_radius: f32 = 0.001
-
-	BAKE_INTERVAL :: 1.0 / 30.0
 
 	last_frame_time: f64 = glfw.GetTime()
 	reload_key_prev: bool = false
@@ -515,7 +129,7 @@ main :: proc() {
 
 		handle_camera_inputs(&window, &camera, dt)
 		if window.pressed_keys[glfw.KEY_R] && !reload_key_prev {
-			if pipeline_reload_all(&pipeline_manager) {
+			if pipeline_reload_all(&rd.pipeline_manager) {
 				fmt.println("Shaders successfully reloaded")
 			}
 		}
@@ -526,9 +140,6 @@ main :: proc() {
 			// TODO: resize the swapchain and size-dependent images
 			window.resized = false
 		}
-
-		width := window.width
-		height := window.height
 
 		// ui
 		ui_new_frame()
@@ -572,7 +183,7 @@ main :: proc() {
 			proj_view         = proj_view,
 			inv_proj_view     = glsl.inverse(proj_view),
 			camera_position   = camera.position,
-			texture_sampler   = texture_sampler_idx,
+			texture_sampler   = rd.texture_sampler_idx,
 			light_dir         = glsl.normalize(light_dir),
 			light_color       = light_color,
 			light_intensity   = light_intensity,
@@ -588,351 +199,29 @@ main :: proc() {
 			cumulus           = cumulus,
 			cloud_noise_scale = cloud_noise_scale,
 			cloud_noise_speed = cloud_noise_speed,
-			sky_cubemap       = sky_cubemap.bindless_idx,
+			sky_cubemap       = rd.sky_cubemap.bindless_idx,
 		}
-		frame_data_buffer := &frame_data_buffers[handle.buffer_idx]
+		frame_data_buffer := &rd.frame_data_buffers[handle.buffer_idx]
 		mem.copy(frame_data_buffer.mapped, &frame_data, size_of(Frame_Data))
 
-		// bake the sky into a cubemap
-		// this avoids having to recompute it for each GI probe ray
-		sky_bake_pc := Sky_Bake_Push {
-			frame_data    = frame_data_buffer.device_address,
-			cubemap_image = sky_cubemap_array_idx,
-		}
-		vk.CmdPushConstants(
-			cb,
-			sky_bake_pipeline.layout,
-			{.COMPUTE},
-			0,
-			size_of(Sky_Bake_Push),
-			&sky_bake_pc,
-		)
-		bind_compute_pipeline(cb, sky_bake_pipeline)
-		vk.CmdDispatch(
-			cb,
-			(SKY_CUBEMAP_SIZE + 7) / 8,
-			(SKY_CUBEMAP_SIZE + 7) / 8,
-			SKY_CUBEMAP_FACES,
-		)
-
-		image_barriers(
-			cb,
-			{
-				image = &sky_cubemap,
-				src_stage = {.COMPUTE_SHADER},
-				src_access = {.SHADER_STORAGE_WRITE},
-				dst_stage = {.COMPUTE_SHADER},
-				dst_access = {.SHADER_SAMPLED_READ},
+		rd.frame = {
+			frame_data_buffer = frame_data_buffer,
+			width = window.width,
+			height = window.height,
+			render_area = {extent = {width = window.width, height = window.height}},
+			viewport = {
+				width = f32(window.width),
+				height = f32(window.height),
+				minDepth = 0.0,
+				maxDepth = 1.0,
 			},
-		)
-
-		// re-bake probes every BAKE_INTERVAL rather than every frame
-		if do_bake {
-			bake_pc := Probe_Bake_Push {
-				frame_data            = frame_data_buffer.device_address,
-				index_buffer          = scene.index_buffer.device_address,
-				normal_buffer         = scene.normal_buffer.device_address,
-				uv_buffer             = scene.uv_buffer.device_address,
-				draw_data_buffer      = scene.draw_data_buffer.device_address,
-				material_buffer       = scene.material_buffer.device_address,
-				probe_position_buffer = gi.probe_position_buffer.device_address,
-				probe_sh_buffer       = gi.probe_sh_buffer.device_address,
-			}
-			vk.CmdPushConstants(
-				cb,
-				probe_bake_pipeline.layout,
-				{.COMPUTE},
-				0,
-				size_of(Probe_Bake_Push),
-				&bake_pc,
-			)
-			bind_compute_pipeline(cb, probe_bake_pipeline)
-			vk.CmdDispatch(cb, 1, gi.probe_count, 1)
-
-			// the fresh SH field is read by the shading compute pass and by the probe debug fragment shader below
-			buffer_barriers(
-				cb,
-				{
-					buffer = &gi.probe_sh_buffer,
-					src_stage = {.COMPUTE_SHADER},
-					src_access = {.SHADER_STORAGE_WRITE},
-					dst_stage = {.COMPUTE_SHADER, .FRAGMENT_SHADER},
-					dst_access = {.SHADER_STORAGE_READ},
-				},
-			)
-		}
-
-		color_attachments := vk.RenderingAttachmentInfo {
-			sType = .RENDERING_ATTACHMENT_INFO,
-			imageView = visbuffer.view,
-			imageLayout = .GENERAL,
-			loadOp = .CLEAR,
-			storeOp = .STORE,
-			clearValue = {color = vk.ClearColorValue{uint32 = [4]u32{}}},
-		}
-		depth_attachment := vk.RenderingAttachmentInfo {
-			sType = .RENDERING_ATTACHMENT_INFO,
-			imageView = depth_image.view,
-			imageLayout = .GENERAL,
-			loadOp = .CLEAR,
-			clearValue = {depthStencil = {depth = 1.0}},
-		}
-		render_area := vk.Rect2D {
-			extent = {width = width, height = height},
-		}
-		rendering_info := vk.RenderingInfo {
-			sType                = .RENDERING_INFO,
-			renderArea           = render_area,
-			layerCount           = 1,
-			colorAttachmentCount = 1,
-			pColorAttachments    = &color_attachments,
-			pDepthAttachment     = &depth_attachment,
-		}
-
-		vk.CmdBeginRendering(cb, &rendering_info)
-
-		vp := vk.Viewport {
-			width    = f32(render_area.extent.width),
-			height   = f32(render_area.extent.height),
-			minDepth = 0.0,
-			maxDepth = 1.0,
-		}
-		scissor := render_area
-		vk.CmdSetViewportWithCount(cb, 1, &vp)
-		vk.CmdSetScissorWithCount(cb, 1, &scissor)
-
-		push := Visbuffer_Push {
-			frame_data       = frame_data_buffer.device_address,
-			vertex_buffer    = scene.position_buffer.device_address,
-			draw_data_buffer = scene.draw_data_buffer.device_address,
-			uv_buffer        = scene.uv_buffer.device_address,
-			material_buffer  = scene.material_buffer.device_address,
-		}
-		vk.CmdPushConstants(
-			cb,
-			visbuffer_pipeline.layout,
-			{.VERTEX, .FRAGMENT},
-			0,
-			size_of(Visbuffer_Push),
-			&push,
-		)
-		bind_raster_pipeline(cb, visbuffer_pipeline)
-		vk.CmdBindIndexBuffer(cb, scene.index_buffer.buffer, 0, .UINT32)
-		vk.CmdDrawIndexedIndirect(
-			cb,
-			scene.draw_command_buffer.buffer,
-			0,
-			scene.draw_count,
-			size_of(vk.DrawIndexedIndirectCommand),
-		)
-
-		vk.CmdEndRendering(cb)
-
-		image_barriers(
-			cb,
-			{
-				image = &visbuffer,
-				src_stage = {.COLOR_ATTACHMENT_OUTPUT},
-				src_access = {.COLOR_ATTACHMENT_WRITE},
-				dst_stage = {.COMPUTE_SHADER},
-				dst_access = {.SHADER_STORAGE_READ},
-			},
-		)
-
-		shading_pc := Shading_Push {
-			frame_data            = frame_data_buffer.device_address,
-			visbuffer             = visbuffer.bindless_idx,
-			draw_image            = draw_image.bindless_idx,
-			index_buffer          = scene.index_buffer.device_address,
-			vertex_buffer         = scene.position_buffer.device_address,
-			draw_data_buffer      = scene.draw_data_buffer.device_address,
-			normal_buffer         = scene.normal_buffer.device_address,
-			tangent_buffer        = scene.tangent_buffer.device_address,
-			uv_buffer             = scene.uv_buffer.device_address,
-			material_buffer       = scene.material_buffer.device_address,
-			probe_sh_buffer       = gi.probe_sh_buffer.device_address,
-			probe_position_buffer = gi.probe_position_buffer.device_address,
-		}
-		vk.CmdPushConstants(
-			cb,
-			shading_pipeline.layout,
-			{.COMPUTE},
-			0,
-			size_of(Shading_Push),
-			&shading_pc,
-		)
-		bind_compute_pipeline(cb, shading_pipeline)
-		vk.CmdDispatch(cb, (width + 7) / 8, (height + 7) / 8, 1)
-
-		image_barriers(
-			cb,
-			{
-				image = &draw_image,
-				src_stage = {.COMPUTE_SHADER},
-				src_access = {.SHADER_STORAGE_WRITE},
-				dst_stage = {.COMPUTE_SHADER, .FRAGMENT_SHADER},
-				dst_access = {.SHADER_SAMPLED_READ, .SHADER_STORAGE_READ},
-			},
-			{
-				image = &depth_image,
-				src_stage = {.LATE_FRAGMENT_TESTS},
-				src_access = {.DEPTH_STENCIL_ATTACHMENT_WRITE},
-				dst_stage = {.EARLY_FRAGMENT_TESTS, .LATE_FRAGMENT_TESTS},
-				dst_access = {.DEPTH_STENCIL_ATTACHMENT_READ, .DEPTH_STENCIL_ATTACHMENT_WRITE},
-			},
-		)
-
-		// physically based bloom (https://learnopengl.com/Guest-Articles/2022/Phys.-Based-Bloom)
-		bind_compute_pipeline(cb, bloom_downsample_pipeline)
-		for i in 0 ..< bloom_mip_count {
-			src_texture := draw_image_tex_idx if i == 0 else bloom_image.bindless_idx
-			src_lod := 0.0 if i == 0 else f32(i - 1)
-			w := max(bloom_base_width >> i, 1)
-			h := max(bloom_base_height >> i, 1)
-
-			image_barriers(
-				cb,
-				{
-					image = &bloom_scratch,
-					src_stage = {.TRANSFER},
-					src_access = {.TRANSFER_READ},
-					dst_stage = {.COMPUTE_SHADER},
-					dst_access = {.SHADER_STORAGE_WRITE},
-				},
-			)
-
-			downsample_pc := Bloom_Downsample_Push {
-				src_texture = src_texture,
-				src_sampler = bloom_sampler_idx,
-				src_lod     = src_lod,
-				dst_image   = bloom_scratch.bindless_idx,
-				dst_width   = w,
-				dst_height  = h,
-			}
-			vk.CmdPushConstants(
-				cb,
-				bloom_downsample_pipeline.layout,
-				{.COMPUTE},
-				0,
-				size_of(Bloom_Downsample_Push),
-				&downsample_pc,
-			)
-			vk.CmdDispatch(cb, (w + 7) / 8, (h + 7) / 8, 1)
-
-			commit_mip(cb, &bloom_scratch, &bloom_image, i, w, h)
-		}
-
-		bind_compute_pipeline(cb, bloom_upsample_pipeline)
-		for i := int(bloom_mip_count) - 2; i >= 0; i -= 1 {
-			w := max(bloom_base_width >> u32(i), 1)
-			h := max(bloom_base_height >> u32(i), 1)
-
-			image_barriers(
-				cb,
-				{
-					image = &bloom_scratch,
-					src_stage = {.TRANSFER},
-					src_access = {.TRANSFER_READ},
-					dst_stage = {.COMPUTE_SHADER},
-					dst_access = {.SHADER_STORAGE_WRITE},
-				},
-			)
-
-			upsample_pc := Bloom_Upsample_Push {
-				src_texture   = bloom_image.bindless_idx,
-				src_sampler   = bloom_sampler_idx,
-				src_lod       = f32(i + 1),
-				dst_lod       = f32(i),
-				dst_image     = bloom_scratch.bindless_idx,
-				dst_width     = w,
-				dst_height    = h,
-				filter_radius = bloom_filter_radius,
-			}
-			vk.CmdPushConstants(
-				cb,
-				bloom_upsample_pipeline.layout,
-				{.COMPUTE},
-				0,
-				size_of(Bloom_Upsample_Push),
-				&upsample_pc,
-			)
-			vk.CmdDispatch(cb, (w + 7) / 8, (h + 7) / 8, 1)
-
-			commit_mip(cb, &bloom_scratch, &bloom_image, u32(i), w, h)
-		}
-
-		// render a fullscreen triangle that samples the draw image and apply tonemapping
-		swap_color_attachments := vk.RenderingAttachmentInfo {
-			sType = .RENDERING_ATTACHMENT_INFO,
-			imageView = swapchain_image.view,
-			imageLayout = .GENERAL,
-			loadOp = .CLEAR,
-			storeOp = .STORE,
-			clearValue = {color = vk.ClearColorValue{float32 = [4]f32{0.0, 0.0, 0.0, 0.0}}},
-		}
-		// reuse the visbuffer pass' depth so probes are occluded by real geometry
-		// present/ui don't use it, relying on VK_EXT_dynamic_rendering_unused_attachments
-		swap_depth_attachment := vk.RenderingAttachmentInfo {
-			sType       = .RENDERING_ATTACHMENT_INFO,
-			imageView   = depth_image.view,
-			imageLayout = .GENERAL,
-			loadOp      = .LOAD,
-			storeOp     = .DONT_CARE,
-		}
-		rendering_info2 := vk.RenderingInfo {
-			sType                = .RENDERING_INFO,
-			renderArea           = render_area,
-			layerCount           = 1,
-			colorAttachmentCount = 1,
-			pColorAttachments    = &swap_color_attachments,
-			pDepthAttachment     = &swap_depth_attachment,
-		}
-		vk.CmdBeginRendering(cb, &rendering_info2)
-		vk.CmdSetViewportWithCount(cb, 1, &vp)
-		vk.CmdSetScissorWithCount(cb, 1, &scissor)
-
-		present_pc := Present_Push {
-			draw_image      = draw_image.bindless_idx,
-			bloom_texture   = bloom_image.bindless_idx,
-			bloom_sampler   = bloom_sampler_idx,
+			do_bake = do_bake,
+			show_probes = show_probes,
 			bloom_intensity = bloom_intensity,
-		}
-		vk.CmdPushConstants(
-			cb,
-			present_pipeline.layout,
-			{.VERTEX, .FRAGMENT},
-			0,
-			size_of(Present_Push),
-			&present_pc,
-		)
-		bind_raster_pipeline(cb, present_pipeline)
-		vk.CmdDraw(cb, 3, 1, 0, 0)
-
-		if show_probes {
-			// probes debug: draw directly on the swapchain
-			probe_debug_pc := Probe_Debug_Push {
-				frame_data            = frame_data_buffer.device_address,
-				vertex_buffer         = gi.debug_sphere_vertex_buffer.device_address,
-				normal_buffer         = gi.debug_sphere_normal_buffer.device_address,
-				probe_position_buffer = gi.probe_position_buffer.device_address,
-				probe_sh_buffer       = gi.probe_sh_buffer.device_address,
-			}
-			vk.CmdPushConstants(
-				cb,
-				probe_debug_pipeline.layout,
-				{.VERTEX, .FRAGMENT},
-				0,
-				size_of(Probe_Debug_Push),
-				&probe_debug_pc,
-			)
-			bind_raster_pipeline(cb, probe_debug_pipeline)
-			vk.CmdDraw(cb, gi.debug_sphere_vertex_count, gi.probe_count, 0, 0)
+			bloom_filter_radius = bloom_filter_radius,
 		}
 
-		ui_render(cb)
-
-		vk.CmdEndRendering(cb)
-
+		renderer_draw(&rd, cb, swapchain_image, &scene, &gi)
 		swapchain_barrier_to_present(cb, swapchain_image)
 
 		command_handler_submit(&device.command_handler, handle, true)

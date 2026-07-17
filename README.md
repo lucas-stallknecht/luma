@@ -29,6 +29,7 @@ Scenes are exported from Blender via the `tools/blender_export` Python script, s
 - Bindless architecture
 - Ray Tracing
 - On-demand command handling
+- A basic render graph rebuilt every frame, inferring pipeline barriers from each pass' declared resource usage instead of hand-placed ones
 
 ## UI
 
