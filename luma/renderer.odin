@@ -6,6 +6,7 @@ import vk "vendor:vulkan"
 SKY_CUBEMAP_SIZE :: 256
 SKY_CUBEMAP_FACES :: 6
 GI_BAKE_INTERVAL :: 1.0 / 30.0
+SSAO_RES_DIVISOR :: 1
 BLOOM_MIP_COUNT :: 4
 
 Frame_Data :: struct {
@@ -56,10 +57,21 @@ Visbuffer_Push :: struct {
 	material_buffer:  vk.DeviceAddress,
 }
 
+Ssao_Push :: struct {
+	frame_data:       vk.DeviceAddress,
+	visbuffer:        u32,
+	ssao_image:       u32,
+	index_buffer:     vk.DeviceAddress,
+	vertex_buffer:    vk.DeviceAddress,
+	draw_data_buffer: vk.DeviceAddress,
+	normal_buffer:    vk.DeviceAddress,
+}
+
 Shading_Push :: struct {
 	frame_data:            vk.DeviceAddress,
 	visbuffer:             u32,
 	draw_image:            u32,
+	ssao_image:            u32,
 	index_buffer:          vk.DeviceAddress,
 	vertex_buffer:         vk.DeviceAddress,
 	draw_data_buffer:      vk.DeviceAddress,
@@ -119,6 +131,9 @@ Renderer :: struct {
 	visbuffer_pipeline:        ^Raster_Pipeline,
 	visbuffer:                 Image,
 	depth_image:               Image,
+	ssao_pipeline:             ^Compute_Pipeline,
+	ssao_image:                Image,
+	ssao_image_tex_idx:        u32,
 	shading_pipeline:          ^Compute_Pipeline,
 	draw_image:                Image,
 	draw_image_tex_idx:        u32,
@@ -135,7 +150,6 @@ Renderer :: struct {
 	bloom_sampler_idx:         u32,
 	present_pipeline:          ^Raster_Pipeline,
 	probe_debug_pipeline:      ^Raster_Pipeline,
-
 	frame:                     struct {
 		scene:               ^Scene,
 		gi:                  ^Gi_System,
@@ -262,6 +276,29 @@ renderer_init :: proc(
 			memory = .GPU_ONLY,
 		},
 	)
+
+	rd.ssao_pipeline = pipeline_manager_add_compute(
+		&rd.pipeline_manager,
+		{
+			name = "ssao",
+			shader = "ssao.glsl",
+			push_constant_size = size_of(Ssao_Push),
+			uses_rt = true,
+		},
+	)
+	rd.ssao_image = create_image(
+		device,
+		init_cb,
+		{
+			width = window.width / SSAO_RES_DIVISOR,
+			height = window.height / SSAO_RES_DIVISOR,
+			format = .R8_UNORM,
+			usage = {.TRANSFER_SRC, .STORAGE, .SAMPLED},
+			memory = .GPU_ONLY,
+			register_bindless = .Storage,
+		},
+	)
+	rd.ssao_image_tex_idx = bindless_register_texture(device, rd.ssao_image.view)
 
 	rd.shading_pipeline = pipeline_manager_add_compute(
 		&rd.pipeline_manager,
@@ -404,6 +441,7 @@ renderer_cleanup :: proc(rd: ^Renderer) {
 	vk.DestroyImageView(rd.device.device, rd.sky_cubemap_array_view, nil)
 	destroy_image(rd.device, rd.visbuffer)
 	destroy_image(rd.device, rd.depth_image)
+	destroy_image(rd.device, rd.ssao_image)
 	destroy_image(rd.device, rd.draw_image)
 	destroy_image(rd.device, rd.bloom_image)
 	destroy_image(rd.device, rd.bloom_scratch)
@@ -518,12 +556,34 @@ visbuffer_pass :: proc(resources: []Render_Resource, user_data: rawptr, cb: vk.C
 	vk.CmdEndRendering(cb)
 }
 
+ssao_pass :: proc(resources: []Render_Resource, user_data: rawptr, cb: vk.CommandBuffer) {
+	rd := cast(^Renderer)user_data
+	pc := Ssao_Push {
+		frame_data       = rd.frame.frame_data_buffer.device_address,
+		visbuffer        = rd.visbuffer.bindless_idx,
+		ssao_image       = rd.ssao_image.bindless_idx,
+		index_buffer     = rd.frame.scene.index_buffer.device_address,
+		vertex_buffer    = rd.frame.scene.position_buffer.device_address,
+		draw_data_buffer = rd.frame.scene.draw_data_buffer.device_address,
+		normal_buffer    = rd.frame.scene.normal_buffer.device_address,
+	}
+	vk.CmdPushConstants(cb, rd.ssao_pipeline.layout, {.COMPUTE}, 0, size_of(Ssao_Push), &pc)
+	bind_compute_pipeline(cb, rd.ssao_pipeline)
+	vk.CmdDispatch(
+		cb,
+		(rd.frame.width / SSAO_RES_DIVISOR + 7) / 8,
+		(rd.frame.height / SSAO_RES_DIVISOR + 7) / 8,
+		1,
+	)
+}
+
 shading_pass :: proc(resources: []Render_Resource, user_data: rawptr, cb: vk.CommandBuffer) {
 	rd := cast(^Renderer)user_data
 	pc := Shading_Push {
 		frame_data            = rd.frame.frame_data_buffer.device_address,
 		visbuffer             = rd.visbuffer.bindless_idx,
 		draw_image            = rd.draw_image.bindless_idx,
+		ssao_image            = rd.ssao_image_tex_idx,
 		index_buffer          = rd.frame.scene.index_buffer.device_address,
 		vertex_buffer         = rd.frame.scene.position_buffer.device_address,
 		draw_data_buffer      = rd.frame.scene.draw_data_buffer.device_address,
@@ -808,12 +868,31 @@ renderer_draw :: proc(
 
 	render_graph_add_pass(
 		&rd.rg,
+		"ssao",
+		ssao_pass,
+		rd,
+		{
+			target = &rd.visbuffer,
+			usage = {stage = {.COMPUTE_SHADER}, access = {.SHADER_STORAGE_READ}},
+		},
+		{
+			target = &rd.ssao_image,
+			usage = {stage = {.COMPUTE_SHADER}, access = {.SHADER_STORAGE_WRITE}},
+		},
+	)
+
+	render_graph_add_pass(
+		&rd.rg,
 		"shading",
 		shading_pass,
 		rd,
 		{
 			target = &rd.visbuffer,
 			usage = {stage = {.COMPUTE_SHADER}, access = {.SHADER_STORAGE_READ}},
+		},
+		{
+			target = &rd.ssao_image,
+			usage = {stage = {.COMPUTE_SHADER}, access = {.SHADER_SAMPLED_READ}},
 		},
 		{
 			target = &rd.sky_cubemap,

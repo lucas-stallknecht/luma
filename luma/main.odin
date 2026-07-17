@@ -113,7 +113,7 @@ main :: proc() {
 
 	last_frame_time: f64 = glfw.GetTime()
 	reload_key_prev: bool = false
-	bake_accum: f32 = BAKE_INTERVAL
+	bake_accum: f32 = GI_BAKE_INTERVAL
 
 	for !window_should_close(&window) {
 		window_update(&window)
@@ -122,9 +122,9 @@ main :: proc() {
 		last_frame_time = time
 
 		bake_accum += dt
-		do_bake := bake_accum >= BAKE_INTERVAL
+		do_bake := bake_accum >= GI_BAKE_INTERVAL
 		if do_bake {
-			bake_accum -= BAKE_INTERVAL
+			bake_accum -= GI_BAKE_INTERVAL
 		}
 
 		handle_camera_inputs(&window, &camera, dt)

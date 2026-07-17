@@ -10,7 +10,6 @@
 #include "probe_global.glsl"
 
 #define NORMAL_BIAS 0.001
-#define SSAO_N_SAMPLES 4
 
 #define DEBUG_VIEW_NONE 0
 #define DEBUG_VIEW_ALBEDO 1
@@ -31,6 +30,7 @@ layout(push_constant) uniform PushConstants {
     FrameDataBuffer frame_data;
     uint visbuffer;
     uint draw_image;
+    uint ssao_image;
     IndexBuffer index_buffer;
     VertexBuffer vertex_buffer;
     DrawDataBuffer draw_data_buffer;
@@ -52,28 +52,6 @@ vec3 id_to_color(uint id) {
     h *= 0xc2b2ae35u;
     h ^= h >> 16;
     return vec3(h & 255u, (h >> 8) & 255u, (h >> 16) & 255u) / 255.0;
-}
-
-// https://en.wikipedia.org/wiki/Barycentric_coordinate_system
-vec3 moller_trumbore(vec3 p0, vec3 p1, vec3 p2, vec3 ray_origin, vec3 ray_dir) {
-    vec3 e1 = p1 - p0;
-    vec3 e2 = p2 - p0;
-    vec3 h = cross(ray_dir, e2);
-    float inv_det = 1.0 / dot(e1, h);
-    vec3 s = ray_origin - p0;
-    float u = inv_det * dot(s, h);
-    vec3 q = cross(s, e1);
-    float v = inv_det * dot(ray_dir, q);
-    return vec3(1.0 - u - v, u, v);
-}
-
-vec3 pixel_bary(ivec2 coord, ivec2 size, mat4 inv_proj_view, vec3 camera_position, vec3 p0w, vec3 p1w, vec3 p2w) {
-    // reconstruct the world-space ray through this pixel's center
-    vec2 ndc = (vec2(coord) + 0.5) / vec2(size) * 2.0 - 1.0;
-    vec4 far = inv_proj_view * vec4(ndc, 1.0, 1.0);
-    far /= far.w;
-    vec3 ray_dir = normalize(far.xyz - camera_position);
-    return moller_trumbore(p0w, p1w, p2w, camera_position, ray_dir);
 }
 
 void main() {
@@ -175,17 +153,8 @@ void main() {
     float shadow = float(!trace_occluded(tlas, ray_origin, frame_data.light_dir, 1000.0));
 
     // ambient occlusion
-    uint ao_seed = hash_uint3(floatBitsToUint(world_pos));
-    float acc = 0.0;
-    for (int i = 0; i < SSAO_N_SAMPLES; i++) {
-        uint sample_seed = ao_seed ^ (uint(i) * 0x9E3779B9u);
-        vec3 local_ray_dir = sample_cosine_weighted_hemisphere(sample_seed);
-        vec3 ssao_ray_dir = TBN * local_ray_dir;
-
-        acc += float(!trace_occluded(tlas, ray_origin, ssao_ray_dir, frame_data.ssao_radius));
-    }
-    float ao = acc / float(SSAO_N_SAMPLES);
-    ao = pow(ao, frame_data.ssao_pow);
+    vec2 screen_uv = (vec2(coord) + 0.5) / vec2(size);
+    float ao = texture(TEX_UNI(push.ssao_image, frame_data.texture_sampler), screen_uv).r;
 
     // indirect diffuse from the probe grid
     vec3 view_dir = normalize(camera_position - world_pos);
