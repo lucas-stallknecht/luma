@@ -58,7 +58,7 @@ ui_new_frame :: proc() {
 	imgui.NewFrame()
 }
 
-ui_render :: proc(cb: vk.CommandBuffer) {
+ui_draw :: proc(cb: vk.CommandBuffer) {
 	imgui.Render()
 	imgui_vk.RenderDrawData(imgui.GetDrawData(), cb)
 }
