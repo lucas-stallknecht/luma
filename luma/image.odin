@@ -32,7 +32,7 @@ Image_Create_Desc :: struct {
 	array_layers:      u32, // 6 for a cubemap, else 1
 }
 
-create_image :: proc(device: ^Device, desc: Image_Create_Desc) -> Image {
+create_image :: proc(device: ^Device, cb: vk.CommandBuffer, desc: Image_Create_Desc) -> Image {
 	out: Image
 	out.format = desc.format
 	out.layout = .UNDEFINED
@@ -99,6 +99,10 @@ create_image :: proc(device: ^Device, desc: Image_Create_Desc) -> Image {
 	}
 	out.mip_levels = mip_levels
 
+	// transition layout from .UNDEFINED
+	// dst is broad because nothing has accessed the image yet, so there's no real scope to narrow it to
+	image_barriers(cb, {image = &out, dst_stage = {.ALL_COMMANDS}, dst_access = {.MEMORY_READ, .MEMORY_WRITE}})
+
 	return out
 }
 
@@ -112,7 +116,7 @@ create_and_upload_image :: proc(
 ) -> Image {
 	desc_copy := desc
 	desc_copy.usage += {.TRANSFER_DST}
-	out := create_image(device, desc_copy)
+	out := create_image(device, cb, desc_copy)
 
 	staging := create_buffer(
 		device,
@@ -120,8 +124,6 @@ create_and_upload_image :: proc(
 	)
 	append(temp_pool, staging)
 	intrinsics.mem_copy(staging.mapped, data, int(data_size))
-
-	image_barriers(cb, {image = &out, dst_stage = {.TRANSFER}, dst_access = {.TRANSFER_WRITE}})
 
 	copy_region := vk.BufferImageCopy {
 		imageSubresource = {aspectMask = {.COLOR}, layerCount = 1},

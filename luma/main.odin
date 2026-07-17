@@ -251,8 +251,11 @@ main :: proc() {
 		return
 	}
 
+	init_handle, init_cb := command_handler_acquire(&device.command_handler)
+
 	visbuffer := create_image(
 		&device,
+		init_cb,
 		{
 			width = window.width,
 			height = window.height,
@@ -264,6 +267,7 @@ main :: proc() {
 	)
 	draw_image := create_image(
 		&device,
+		init_cb,
 		{
 			width = window.width,
 			height = window.height,
@@ -277,6 +281,7 @@ main :: proc() {
 
 	depth_image := create_image(
 		&device,
+		init_cb,
 		{
 			width = window.width,
 			height = window.height,
@@ -290,6 +295,7 @@ main :: proc() {
 	SKY_CUBEMAP_SIZE :: 256
 	sky_cubemap := create_image(
 		&device,
+		init_cb,
 		{
 			width = SKY_CUBEMAP_SIZE,
 			height = SKY_CUBEMAP_SIZE,
@@ -359,6 +365,7 @@ main :: proc() {
 	bloom_base_height := max(window.height / 2, 1)
 	bloom_image := create_image(
 		&device,
+		init_cb,
 		{
 			width = bloom_base_width,
 			height = bloom_base_height,
@@ -372,6 +379,7 @@ main :: proc() {
 	bloom_mip_count := min(bloom_image.mip_levels, BLOOM_MIP_COUNT)
 	bloom_scratch := create_image(
 		&device,
+		init_cb,
 		{
 			width = bloom_base_width,
 			height = bloom_base_height,
@@ -381,6 +389,9 @@ main :: proc() {
 			register_bindless = .Storage,
 		},
 	)
+
+	command_handler_submit(&device.command_handler, init_handle, false)
+	command_handler_wait(&device.command_handler, init_handle)
 
 	texture_sampler: vk.Sampler
 	texture_sampler_ci := vk.SamplerCreateInfo {
@@ -531,7 +542,6 @@ main :: proc() {
 			imgui.SliderFloat3("Direction", cast(^[3]f32)&light_dir, -1, 1)
 			imgui.ColorEdit3("Color", cast(^[3]f32)&light_color)
 			imgui.SliderFloat("Light intensity", &light_intensity, 0, 40)
-			imgui.SliderFloat("Albedo boost", &albedo_boost, 1, 4)
 
 			imgui.SeparatorText("Sky")
 			imgui.SliderFloat("Cirrus clouds", &cirrus, 0, 1)
@@ -549,6 +559,7 @@ main :: proc() {
 
 			imgui.SeparatorText("Global Illumination")
 			imgui.Checkbox("Show probes", &show_probes)
+			imgui.SliderFloat("Albedo boost", &albedo_boost, 1, 4)
 		}
 		imgui.End()
 
@@ -596,14 +607,6 @@ main :: proc() {
 			size_of(Sky_Bake_Push),
 			&sky_bake_pc,
 		)
-		image_barriers(
-			cb,
-			{
-				image = &sky_cubemap,
-				dst_stage = {.COMPUTE_SHADER},
-				dst_access = {.SHADER_STORAGE_WRITE},
-			},
-		)
 		bind_compute_pipeline(cb, sky_bake_pipeline)
 		vk.CmdDispatch(
 			cb,
@@ -625,17 +628,6 @@ main :: proc() {
 
 		// re-bake probes every BAKE_INTERVAL rather than every frame
 		if do_bake {
-			buffer_barriers(
-				cb,
-				{
-					buffer = &gi.probe_sh_buffer,
-					src_stage = {.COMPUTE_SHADER, .FRAGMENT_SHADER},
-					src_access = {.SHADER_STORAGE_READ, .SHADER_STORAGE_WRITE},
-					dst_stage = {.COMPUTE_SHADER},
-					dst_access = {.SHADER_STORAGE_READ, .SHADER_STORAGE_WRITE},
-				},
-			)
-
 			bake_pc := Probe_Bake_Push {
 				frame_data            = frame_data_buffer.device_address,
 				index_buffer          = scene.index_buffer.device_address,
@@ -669,27 +661,6 @@ main :: proc() {
 				},
 			)
 		}
-
-		image_barriers(
-			cb,
-			{
-				image = &visbuffer,
-				dst_stage = {.COLOR_ATTACHMENT_OUTPUT},
-				dst_access = {.COLOR_ATTACHMENT_WRITE},
-			},
-			{
-				image = &depth_image,
-				dst_stage = {.EARLY_FRAGMENT_TESTS, .LATE_FRAGMENT_TESTS},
-				dst_access = {.DEPTH_STENCIL_ATTACHMENT_READ, .DEPTH_STENCIL_ATTACHMENT_WRITE},
-			},
-			{
-				image = &draw_image,
-				src_stage = {.FRAGMENT_SHADER},
-				src_access = {.SHADER_STORAGE_READ},
-				dst_stage = {.COMPUTE_SHADER},
-				dst_access = {.SHADER_STORAGE_WRITE},
-			},
-		)
 
 		color_attachments := vk.RenderingAttachmentInfo {
 			sType = .RENDERING_ATTACHMENT_INFO,

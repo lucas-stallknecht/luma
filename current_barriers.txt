@@ -1,0 +1,65 @@
+..compute_sky
+
+image_barriers(
+	cb,
+	{
+		image = &sky_cubemap,
+		src_stage = {.COMPUTE_SHADER},
+		src_access = {.SHADER_STORAGE_WRITE},
+		dst_stage = {.COMPUTE_SHADER},
+		dst_access = {.SHADER_SAMPLED_READ},
+	},
+)
+
+if do_bake {
+
+    ..bake_probes
+
+	buffer_barriers(
+		cb,
+		{
+			buffer = &gi.probe_sh_buffer,
+			src_stage = {.COMPUTE_SHADER},
+			src_access = {.SHADER_STORAGE_WRITE},
+			dst_stage = {.COMPUTE_SHADER, .FRAGMENT_SHADER},
+			dst_access = {.SHADER_STORAGE_READ},
+		},
+	)
+}
+
+..render_visbuffer
+
+image_barriers(
+	cb,
+	{
+		image = &visbuffer,
+		src_stage = {.COLOR_ATTACHMENT_OUTPUT},
+		src_access = {.COLOR_ATTACHMENT_WRITE},
+		dst_stage = {.COMPUTE_SHADER},
+		dst_access = {.SHADER_STORAGE_READ},
+	},
+)
+
+..compute_shading
+
+image_barriers(
+	cb,
+	{
+		image = &draw_image,
+		src_stage = {.COMPUTE_SHADER},
+		src_access = {.SHADER_STORAGE_WRITE},
+		dst_stage = {.COMPUTE_SHADER, .FRAGMENT_SHADER},
+		dst_access = {.SHADER_SAMPLED_READ, .SHADER_STORAGE_READ},
+	},
+	{
+		image = &depth_image,
+		src_stage = {.LATE_FRAGMENT_TESTS},
+		src_access = {.DEPTH_STENCIL_ATTACHMENT_WRITE},
+		dst_stage = {.EARLY_FRAGMENT_TESTS, .LATE_FRAGMENT_TESTS},
+		dst_access = {.DEPTH_STENCIL_ATTACHMENT_READ, .DEPTH_STENCIL_ATTACHMENT_WRITE},
+	},
+)
+
+..do_bloom_things
+
+swapchain_barrier_to_present()
