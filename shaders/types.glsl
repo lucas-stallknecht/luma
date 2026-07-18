@@ -32,8 +32,8 @@ struct FrameData {
     vec3 grid_spacing;
     uint frame_idx;
     ivec3 probe_counts;
-    float ssao_pow;
-    float ssao_radius;
+    float rtao_pow;
+    float rtao_radius;
     float time;
     float cirrus;
     float cumulus;

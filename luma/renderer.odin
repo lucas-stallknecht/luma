@@ -6,7 +6,7 @@ import vk "vendor:vulkan"
 SKY_CUBEMAP_SIZE :: 256
 SKY_CUBEMAP_FACES :: 6
 GI_BAKE_INTERVAL :: 1.0 / 30.0
-SSAO_RES_DIVISOR :: 1
+RTAO_RES_DIVISOR :: 1
 BLOOM_MIP_COUNT :: 4
 
 Frame_Data :: struct {
@@ -24,8 +24,8 @@ Frame_Data :: struct {
 	grid_spacing:      glsl.vec3,
 	frame_idx:         u32,
 	probe_counts:      [3]u32,
-	ssao_pow:          f32,
-	ssao_radius:       f32,
+	rtao_pow:          f32,
+	rtao_radius:       f32,
 	time:              f32,
 	cirrus:            f32,
 	cumulus:           f32,
@@ -58,10 +58,10 @@ Visbuffer_Push :: struct {
 	material_buffer:  vk.DeviceAddress,
 }
 
-Ssao_Push :: struct {
+Rtao_Push :: struct {
 	frame_data:       vk.DeviceAddress,
 	visbuffer:        u32,
-	ssao_image:       u32,
+	rtao_image:       u32,
 	index_buffer:     vk.DeviceAddress,
 	vertex_buffer:    vk.DeviceAddress,
 	draw_data_buffer: vk.DeviceAddress,
@@ -81,7 +81,7 @@ Shading_Push :: struct {
 	frame_data:            vk.DeviceAddress,
 	visbuffer:             u32,
 	draw_image:            u32,
-	ssao_image:            u32,
+	rtao_image:            u32,
 	index_buffer:          vk.DeviceAddress,
 	vertex_buffer:         vk.DeviceAddress,
 	draw_data_buffer:      vk.DeviceAddress,
@@ -142,9 +142,9 @@ Renderer :: struct {
 	visbuffer_pipeline:        ^Raster_Pipeline,
 	visbuffer:                 Image,
 	depth_image:               Image,
-	ssao_pipeline:             ^Compute_Pipeline,
-	ssao_image:                Image,
-	ssao_image_tex_idx:        u32,
+	rtao_pipeline:             ^Compute_Pipeline,
+	rtao_image:                Image,
+	rtao_image_tex_idx:        u32,
 	motion_vectors_pipeline:   ^Compute_Pipeline,
 	velocity_image:            Image,
 	prev_proj_view:            glsl.mat4,
@@ -291,28 +291,28 @@ renderer_init :: proc(
 		},
 	)
 
-	rd.ssao_pipeline = pipeline_manager_add_compute(
+	rd.rtao_pipeline = pipeline_manager_add_compute(
 		&rd.pipeline_manager,
 		{
-			name = "ssao",
-			shader = "ssao.glsl",
-			push_constant_size = size_of(Ssao_Push),
+			name = "rtao",
+			shader = "rtao.glsl",
+			push_constant_size = size_of(Rtao_Push),
 			uses_rt = true,
 		},
 	)
-	rd.ssao_image = create_image(
+	rd.rtao_image = create_image(
 		device,
 		init_cb,
 		{
-			width = window.width / SSAO_RES_DIVISOR,
-			height = window.height / SSAO_RES_DIVISOR,
+			width = window.width / RTAO_RES_DIVISOR,
+			height = window.height / RTAO_RES_DIVISOR,
 			format = .R8_UNORM,
 			usage = {.TRANSFER_SRC, .STORAGE, .SAMPLED},
 			memory = .GPU_ONLY,
 			register_bindless = .Storage,
 		},
 	)
-	rd.ssao_image_tex_idx = bindless_register_texture(device, rd.ssao_image.view)
+	rd.rtao_image_tex_idx = bindless_register_texture(device, rd.rtao_image.view)
 
 	rd.motion_vectors_pipeline = pipeline_manager_add_compute(
 		&rd.pipeline_manager,
@@ -476,7 +476,7 @@ renderer_cleanup :: proc(rd: ^Renderer) {
 	vk.DestroyImageView(rd.device.device, rd.sky_cubemap_array_view, nil)
 	destroy_image(rd.device, rd.visbuffer)
 	destroy_image(rd.device, rd.depth_image)
-	destroy_image(rd.device, rd.ssao_image)
+	destroy_image(rd.device, rd.rtao_image)
 	destroy_image(rd.device, rd.velocity_image)
 	destroy_image(rd.device, rd.draw_image)
 	destroy_image(rd.device, rd.bloom_image)
@@ -592,23 +592,23 @@ visbuffer_pass :: proc(resources: []Render_Resource, user_data: rawptr, cb: vk.C
 	vk.CmdEndRendering(cb)
 }
 
-ssao_pass :: proc(resources: []Render_Resource, user_data: rawptr, cb: vk.CommandBuffer) {
+rtao_pass :: proc(resources: []Render_Resource, user_data: rawptr, cb: vk.CommandBuffer) {
 	rd := cast(^Renderer)user_data
-	pc := Ssao_Push {
+	pc := Rtao_Push {
 		frame_data       = rd.frame.frame_data_buffer.device_address,
 		visbuffer        = rd.visbuffer.bindless_idx,
-		ssao_image       = rd.ssao_image.bindless_idx,
+		rtao_image       = rd.rtao_image.bindless_idx,
 		index_buffer     = rd.frame.scene.index_buffer.device_address,
 		vertex_buffer    = rd.frame.scene.position_buffer.device_address,
 		draw_data_buffer = rd.frame.scene.draw_data_buffer.device_address,
 		normal_buffer    = rd.frame.scene.normal_buffer.device_address,
 	}
-	vk.CmdPushConstants(cb, rd.ssao_pipeline.layout, {.COMPUTE}, 0, size_of(Ssao_Push), &pc)
-	bind_compute_pipeline(cb, rd.ssao_pipeline)
+	vk.CmdPushConstants(cb, rd.rtao_pipeline.layout, {.COMPUTE}, 0, size_of(Rtao_Push), &pc)
+	bind_compute_pipeline(cb, rd.rtao_pipeline)
 	vk.CmdDispatch(
 		cb,
-		(rd.frame.width / SSAO_RES_DIVISOR + 7) / 8,
-		(rd.frame.height / SSAO_RES_DIVISOR + 7) / 8,
+		(rd.frame.width / RTAO_RES_DIVISOR + 7) / 8,
+		(rd.frame.height / RTAO_RES_DIVISOR + 7) / 8,
 		1,
 	)
 }
@@ -645,7 +645,7 @@ shading_pass :: proc(resources: []Render_Resource, user_data: rawptr, cb: vk.Com
 		frame_data            = rd.frame.frame_data_buffer.device_address,
 		visbuffer             = rd.visbuffer.bindless_idx,
 		draw_image            = rd.draw_image.bindless_idx,
-		ssao_image            = rd.ssao_image_tex_idx,
+		rtao_image            = rd.rtao_image_tex_idx,
 		index_buffer          = rd.frame.scene.index_buffer.device_address,
 		vertex_buffer         = rd.frame.scene.position_buffer.device_address,
 		draw_data_buffer      = rd.frame.scene.draw_data_buffer.device_address,
@@ -946,15 +946,15 @@ renderer_draw :: proc(
 
 	render_graph_add_pass(
 		&rd.rg,
-		"ssao",
-		ssao_pass,
+		"rtao",
+		rtao_pass,
 		rd,
 		{
 			target = &rd.visbuffer,
 			usage = {stage = {.COMPUTE_SHADER}, access = {.SHADER_STORAGE_READ}},
 		},
 		{
-			target = &rd.ssao_image,
+			target = &rd.rtao_image,
 			usage = {stage = {.COMPUTE_SHADER}, access = {.SHADER_STORAGE_WRITE}},
 		},
 	)
@@ -969,7 +969,7 @@ renderer_draw :: proc(
 			usage = {stage = {.COMPUTE_SHADER}, access = {.SHADER_STORAGE_READ}},
 		},
 		{
-			target = &rd.ssao_image,
+			target = &rd.rtao_image,
 			usage = {stage = {.COMPUTE_SHADER}, access = {.SHADER_SAMPLED_READ}},
 		},
 		{

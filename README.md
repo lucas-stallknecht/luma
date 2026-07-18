@@ -31,10 +31,6 @@ Scenes are exported from Blender via the `tools/blender_export` Python script, s
 - On-demand command handling
 - A basic render graph rebuilt every frame, inferring pipeline barriers from each pass' declared resource usage instead of hand-placed ones
 
-## UI
-
-The debug panel (light/sky/SSAO/bloom controls, frame time) is [Dear ImGui](https://github.com/ocornut/imgui), integrated through its stock Vulkan + GLFW backends running in dynamic-rendering mode.
-
 ## Building
 
 You'll need the [Odin compiler](https://odin-lang.org/), the [Vulkan SDK](https://vulkan.lunarg.com/), Python, and Git installed, along with a GPU that supports Vulkan ray tracing (`VK_KHR_ray_tracing_pipeline`). With those in place:

@@ -103,8 +103,8 @@ main :: proc() {
 	light_color := glsl.vec3{1.0, 1.0, 1.0}
 	light_intensity: f32 = 12.0
 	albedo_boost: f32 = 1.4
-	ssao_radius: f32 = 0.3
-	ssao_pow: f32 = 1.0
+	rtao_radius: f32 = 0.3
+	rtao_pow: f32 = 1.0
 	cirrus: f32 = 0.4
 	cumulus: f32 = 0.8
 	cloud_noise_scale: f32 = 0.7
@@ -163,8 +163,8 @@ main :: proc() {
 			imgui.SliderFloat("Noise pan speed", &cloud_noise_speed, 0.01, 0.5)
 
 			imgui.SeparatorText("Ambient Occlusion")
-			imgui.SliderFloat("Radius", &ssao_radius, 0, 2)
-			imgui.SliderFloat("Power", &ssao_pow, 0.1, 8)
+			imgui.SliderFloat("Radius", &rtao_radius, 0, 2)
+			imgui.SliderFloat("Power", &rtao_pow, 0.1, 8)
 
 			imgui.SeparatorText("Bloom")
 			imgui.SliderFloat("Bloom intensity", &bloom_intensity, 0.001, 0.2)
@@ -191,8 +191,8 @@ main :: proc() {
 			light_color       = light_color,
 			light_intensity   = light_intensity,
 			albedo_boost      = albedo_boost,
-			ssao_radius       = ssao_radius,
-			ssao_pow          = ssao_pow,
+			rtao_radius       = rtao_radius,
+			rtao_pow          = rtao_pow,
 			grid_min          = gi.info.grid_min,
 			probe_count       = gi.probe_count,
 			grid_spacing      = gi.grid_spacing,

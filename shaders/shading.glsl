@@ -30,7 +30,7 @@ layout(push_constant) uniform PushConstants {
     FrameDataBuffer frame_data;
     uint visbuffer;
     uint draw_image;
-    uint ssao_image;
+    uint rtao_image;
     IndexBuffer index_buffer;
     VertexBuffer vertex_buffer;
     DrawDataBuffer draw_data_buffer;
@@ -88,7 +88,7 @@ void main() {
     vec2 uv_ddx = interpolate_uv_derivative(push.uv_buffer, hit.indices, bary_d.ddx);
     vec2 uv_ddy = interpolate_uv_derivative(push.uv_buffer, hit.indices, bary_d.ddy);
 
-    // world normal, transformed up front it can serve both normal mapping and SSAO
+    // world normal, transformed up front it can serve both normal mapping and RTAO
     vec3 normal = interpolate_normal(push.normal_buffer, hit.indices, hit.bary, hit.draw.transform);
 
     vec4 t0 = push.tangent_buffer.tangents[hit.indices.x];
@@ -126,7 +126,7 @@ void main() {
 
     // ambient occlusion
     vec2 screen_uv = (vec2(coord) + 0.5) / vec2(size);
-    float ao = texture(TEX_UNI(push.ssao_image, frame_data.texture_sampler), screen_uv).r;
+    float ao = texture(TEX_UNI(push.rtao_image, frame_data.texture_sampler), screen_uv).r;
 
     // indirect diffuse from the probe grid
     vec3 view_dir = normalize(frame_data.camera_position - hit.world_pos);
