@@ -193,6 +193,7 @@ main :: proc() {
 			albedo_boost      = albedo_boost,
 			rtao_radius       = rtao_radius,
 			rtao_pow          = rtao_pow,
+			frame_idx         = u32(swapchain.frame_idx),
 			grid_min          = gi.info.grid_min,
 			probe_count       = gi.probe_count,
 			grid_spacing      = gi.grid_spacing,

@@ -14,7 +14,8 @@ Scenes are exported from Blender via the `tools/blender_export` Python script, s
   ![](misc/visbuffer.png)
 
 - **Frostbite BRDF shading**, plus the usual essentials like normal mapping.
-- **Ray traced directional hard shadows and ambient occlusion.** Soft shadows and denoising will follow once motion vectors are in.
+- **Ray traced directional hard shadows.** Soft shadows will follow.
+- **Ray traced ambient occlusion**, with motion vectors driving temporal reprojection to denoise it.
 - **Physically correct bloom.**
 - **DDGI** for global illumination, using irradiance probes. Radiance is stored as spherical harmonics, with the coefficients computed by shooting rays around each probe and integrating with Monte Carlo. Bounces accumulate over frames. The per-probe depth with octahedral mapping isn't implemented yet.
 

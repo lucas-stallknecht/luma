@@ -6,7 +6,7 @@ import vk "vendor:vulkan"
 SKY_CUBEMAP_SIZE :: 256
 SKY_CUBEMAP_FACES :: 6
 GI_BAKE_INTERVAL :: 1.0 / 30.0
-RTAO_RES_DIVISOR :: 1
+RTAO_RES_DIVISOR :: 2
 BLOOM_MIP_COUNT :: 4
 
 Frame_Data :: struct {
@@ -62,6 +62,9 @@ Rtao_Push :: struct {
 	frame_data:       vk.DeviceAddress,
 	visbuffer:        u32,
 	rtao_image:       u32,
+	prev_rtao_image:  u32,
+	prev_depth_image: u32,
+	velocity_image:   u32,
 	index_buffer:     vk.DeviceAddress,
 	vertex_buffer:    vk.DeviceAddress,
 	draw_data_buffer: vk.DeviceAddress,
@@ -145,6 +148,9 @@ Renderer :: struct {
 	rtao_pipeline:             ^Compute_Pipeline,
 	rtao_image:                Image,
 	rtao_image_tex_idx:        u32,
+	prev_rtao_image:           Image,
+	prev_rtao_image_tex_idx:   u32,
+	prev_depth_image:          Image,
 	motion_vectors_pipeline:   ^Compute_Pipeline,
 	velocity_image:            Image,
 	prev_proj_view:            glsl.mat4,
@@ -279,17 +285,16 @@ renderer_init :: proc(
 			register_bindless = .Storage,
 		},
 	)
-	rd.depth_image = create_image(
-		device,
-		init_cb,
-		{
-			width = window.width,
-			height = window.height,
-			format = .D32_SFLOAT,
-			usage = {.DEPTH_STENCIL_ATTACHMENT},
-			memory = .GPU_ONLY,
-		},
-	)
+	depth_image_desc := Image_Create_Desc {
+		width  = window.width,
+		height = window.height,
+		format = .D32_SFLOAT,
+		usage  = {.DEPTH_STENCIL_ATTACHMENT, .TRANSFER_SRC},
+		memory = .GPU_ONLY,
+	}
+	rd.depth_image = create_image(device, init_cb, depth_image_desc)
+	depth_image_desc.usage += {.TRANSFER_DST}
+	rd.prev_depth_image = create_image(device, init_cb, depth_image_desc)
 
 	rd.rtao_pipeline = pipeline_manager_add_compute(
 		&rd.pipeline_manager,
@@ -300,19 +305,36 @@ renderer_init :: proc(
 			uses_rt = true,
 		},
 	)
-	rd.rtao_image = create_image(
-		device,
-		init_cb,
-		{
-			width = window.width / RTAO_RES_DIVISOR,
-			height = window.height / RTAO_RES_DIVISOR,
-			format = .R8_UNORM,
-			usage = {.TRANSFER_SRC, .STORAGE, .SAMPLED},
-			memory = .GPU_ONLY,
-			register_bindless = .Storage,
-		},
-	)
+	rtao_image_desc := Image_Create_Desc {
+		width             = window.width / RTAO_RES_DIVISOR,
+		height            = window.height / RTAO_RES_DIVISOR,
+		format            = .R8_UNORM,
+		usage             = {.TRANSFER_SRC, .STORAGE, .SAMPLED},
+		memory            = .GPU_ONLY,
+		register_bindless = .Storage,
+	}
+	rd.rtao_image = create_image(device, init_cb, rtao_image_desc)
 	rd.rtao_image_tex_idx = bindless_register_texture(device, rd.rtao_image.view)
+	rtao_image_desc.usage += {.TRANSFER_DST}
+	rd.prev_rtao_image = create_image(device, init_cb, rtao_image_desc)
+	rd.prev_rtao_image_tex_idx = bindless_register_texture(device, rd.prev_rtao_image.view)
+	// seed history with "unoccluded" so the first frame's reprojected read isn't garbage
+	rtao_clear_color := vk.ClearColorValue {
+		float32 = {1, 1, 1, 1},
+	}
+	rtao_clear_range := vk.ImageSubresourceRange {
+		aspectMask = {.COLOR},
+		levelCount = 1,
+		layerCount = 1,
+	}
+	vk.CmdClearColorImage(
+		init_cb,
+		rd.prev_rtao_image.image,
+		.GENERAL,
+		&rtao_clear_color,
+		1,
+		&rtao_clear_range,
+	)
 
 	rd.motion_vectors_pipeline = pipeline_manager_add_compute(
 		&rd.pipeline_manager,
@@ -477,6 +499,8 @@ renderer_cleanup :: proc(rd: ^Renderer) {
 	destroy_image(rd.device, rd.visbuffer)
 	destroy_image(rd.device, rd.depth_image)
 	destroy_image(rd.device, rd.rtao_image)
+	destroy_image(rd.device, rd.prev_rtao_image)
+	destroy_image(rd.device, rd.prev_depth_image)
 	destroy_image(rd.device, rd.velocity_image)
 	destroy_image(rd.device, rd.draw_image)
 	destroy_image(rd.device, rd.bloom_image)
@@ -598,6 +622,9 @@ rtao_pass :: proc(resources: []Render_Resource, user_data: rawptr, cb: vk.Comman
 		frame_data       = rd.frame.frame_data_buffer.device_address,
 		visbuffer        = rd.visbuffer.bindless_idx,
 		rtao_image       = rd.rtao_image.bindless_idx,
+		prev_rtao_image  = rd.prev_rtao_image_tex_idx,
+		prev_depth_image = rd.prev_depth_image.bindless_idx,
+		velocity_image   = rd.velocity_image.bindless_idx,
 		index_buffer     = rd.frame.scene.index_buffer.device_address,
 		vertex_buffer    = rd.frame.scene.position_buffer.device_address,
 		draw_data_buffer = rd.frame.scene.draw_data_buffer.device_address,
@@ -610,6 +637,39 @@ rtao_pass :: proc(resources: []Render_Resource, user_data: rawptr, cb: vk.Comman
 		(rd.frame.width / RTAO_RES_DIVISOR + 7) / 8,
 		(rd.frame.height / RTAO_RES_DIVISOR + 7) / 8,
 		1,
+	)
+}
+
+history_copy_pass :: proc(resources: []Render_Resource, user_data: rawptr, cb: vk.CommandBuffer) {
+	rd := cast(^Renderer)user_data
+	rtao_copy_region := vk.ImageCopy {
+		srcSubresource = {aspectMask = {.COLOR}, layerCount = 1},
+		dstSubresource = {aspectMask = {.COLOR}, layerCount = 1},
+		extent = {rd.frame.width / RTAO_RES_DIVISOR, rd.frame.height / RTAO_RES_DIVISOR, 1},
+	}
+	vk.CmdCopyImage(
+		cb,
+		rd.rtao_image.image,
+		.GENERAL,
+		rd.prev_rtao_image.image,
+		.GENERAL,
+		1,
+		&rtao_copy_region,
+	)
+
+	depth_copy_region := vk.ImageCopy {
+		srcSubresource = {aspectMask = {.DEPTH}, layerCount = 1},
+		dstSubresource = {aspectMask = {.DEPTH}, layerCount = 1},
+		extent = {rd.frame.width, rd.frame.height, 1},
+	}
+	vk.CmdCopyImage(
+		cb,
+		rd.depth_image.image,
+		.GENERAL,
+		rd.prev_depth_image.image,
+		.GENERAL,
+		1,
+		&depth_copy_region,
 	)
 }
 
@@ -954,9 +1014,32 @@ renderer_draw :: proc(
 			usage = {stage = {.COMPUTE_SHADER}, access = {.SHADER_STORAGE_READ}},
 		},
 		{
+			target = &rd.velocity_image,
+			usage = {stage = {.COMPUTE_SHADER}, access = {.SHADER_STORAGE_READ}},
+		},
+		{
+			target = &rd.prev_rtao_image,
+			usage = {stage = {.COMPUTE_SHADER}, access = {.SHADER_SAMPLED_READ}},
+		},
+		{
+			target = &rd.prev_depth_image,
+			usage = {stage = {.COMPUTE_SHADER}, access = {.SHADER_SAMPLED_READ}},
+		},
+		{
 			target = &rd.rtao_image,
 			usage = {stage = {.COMPUTE_SHADER}, access = {.SHADER_STORAGE_WRITE}},
 		},
+	)
+
+	render_graph_add_pass(
+		&rd.rg,
+		"history_copy",
+		history_copy_pass,
+		rd,
+		{target = &rd.rtao_image, usage = {stage = {.TRANSFER}, access = {.TRANSFER_READ}}},
+		{target = &rd.prev_rtao_image, usage = {stage = {.TRANSFER}, access = {.TRANSFER_WRITE}}},
+		{target = &rd.depth_image, usage = {stage = {.TRANSFER}, access = {.TRANSFER_READ}}},
+		{target = &rd.prev_depth_image, usage = {stage = {.TRANSFER}, access = {.TRANSFER_WRITE}}},
 	)
 
 	render_graph_add_pass(
