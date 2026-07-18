@@ -41,6 +41,7 @@ Device :: struct {
 		storage_rgba8:     u32,
 		storage_r8:        u32,
 		storage_f32_array: u32,
+		storage_rg16f:     u32,
 	},
 }
 
@@ -271,7 +272,7 @@ device_init :: proc(d: ^Device, desc: Device_Desc) {
 		{type = .SAMPLED_IMAGE, descriptorCount = MAX_BINDLESS_IMAGES + MAX_CUBE_TEXTURES},
 		{
 			type = .STORAGE_IMAGE,
-			descriptorCount = MAX_BINDLESS_IMAGES * 4 + MAX_STORAGE_ARRAY_IMAGES,
+			descriptorCount = MAX_BINDLESS_IMAGES * 5 + MAX_STORAGE_ARRAY_IMAGES,
 		},
 		{type = .ACCELERATION_STRUCTURE_KHR, descriptorCount = 1},
 	}

@@ -20,6 +20,7 @@ struct Material {
 struct FrameData {
     mat4 proj_view;
     mat4 inv_proj_view;
+    mat4 prev_proj_view;
     vec3 camera_position;
     uint texture_sampler;
     vec3 light_dir;

@@ -18,11 +18,17 @@ void vert_main() {
 
 #ifdef STAGE_FRAGMENT
 
+#define DEBUG_VIEW_NONE 0
+#define DEBUG_VIEW_MOTION 1
+
+#define DEBUG_VIEW DEBUG_VIEW_NONE
+
 layout(push_constant) uniform PushConstants {
     uint draw_image;
     uint bloom_texture;
     uint bloom_sampler;
     float bloom_intensity;
+    uint velocity_image;
 } push;
 
 layout(location = 0) out vec4 frag_color;
@@ -51,6 +57,13 @@ vec3 pbr_neutral_tonemapping(vec3 color) {
 
 void frag_main() {
     ivec2 coord = ivec2(gl_FragCoord.xy);
+
+    #if DEBUG_VIEW == DEBUG_VIEW_MOTION
+    vec2 velocity = imageLoad(RG16F_UNI(push.velocity_image), coord).rg;
+    frag_color = vec4(velocity * 20.0 + 0.5, 0.0, 1.0);
+    return;
+    #endif
+
     vec4 hdr_color = imageLoad(F32_UNI(push.draw_image), coord);
 
     vec2 uv = (vec2(coord) + 0.5) / vec2(imageSize(F32_UNI(push.draw_image)));

@@ -1,12 +1,12 @@
 #version 460 core
 
-#extension GL_EXT_ray_query : require
-
 #include "luma.glsl"
 #include "types.glsl"
 #include "random.glsl"
 #include "brdf.glsl"
-#include "hit_utils.glsl"
+#include "utils/visbuffer_utils.glsl"
+#include "utils/material_utils.glsl"
+#include "utils/ray_utils.glsl"
 #include "probe_global.glsl"
 
 #define NORMAL_BIAS 0.001
@@ -59,12 +59,15 @@ void main() {
     ivec2 size = imageSize(U32(push.visbuffer));
     if (any(greaterThanEqual(coord, size))) return;
 
-    uvec4 pix = imageLoad(U32(push.visbuffer), coord);
-    uint triangle_id = pix.r;
-
     FrameData frame_data = push.frame_data.data;
 
-    if (triangle_id == 0) {
+    VisbufferHit hit = decode_visbuffer_hit(
+            push.visbuffer, coord, size,
+            push.draw_data_buffer, push.index_buffer, push.vertex_buffer,
+            frame_data.inv_proj_view, frame_data.camera_position
+        );
+
+    if (!hit.valid) {
         vec2 ndc = (vec2(coord) + 0.5) / vec2(size) * 2.0 - 1.0;
         vec4 far = frame_data.inv_proj_view * vec4(ndc, 1.0, 1.0);
         far /= far.w;
@@ -75,53 +78,23 @@ void main() {
         return;
     }
 
-    DrawData draw = push.draw_data_buffer.draw_data[pix.g];
-    Material material = push.material_buffer.materials[draw.material_idx];
+    Material material = push.material_buffer.materials[hit.draw.material_idx];
 
-    uint triangle_idx = triangle_id - 1;
-    uvec3 tri = fetch_triangle_indices(push.index_buffer, triangle_idx);
+    BaryDerivatives bary_d = visbuffer_bary_derivatives(
+            hit, coord, size, frame_data.inv_proj_view, frame_data.camera_position
+        );
 
-    vec3 p0 = push.vertex_buffer.positions[tri.x];
-    vec3 p1 = push.vertex_buffer.positions[tri.y];
-    vec3 p2 = push.vertex_buffer.positions[tri.z];
+    vec2 uv = interpolate_uv(push.uv_buffer, hit.indices, hit.bary);
+    vec2 uv_ddx = interpolate_uv_derivative(push.uv_buffer, hit.indices, bary_d.ddx);
+    vec2 uv_ddy = interpolate_uv_derivative(push.uv_buffer, hit.indices, bary_d.ddy);
 
-    vec3 p0w = vec3(draw.transform * vec4(p0, 1.0));
-    vec3 p1w = vec3(draw.transform * vec4(p1, 1.0));
-    vec3 p2w = vec3(draw.transform * vec4(p2, 1.0));
-
-    mat4 inv_proj_view = frame_data.inv_proj_view;
-    vec3 camera_position = frame_data.camera_position;
-
-    vec3 bary = pixel_bary(coord, size, inv_proj_view, camera_position, p0w, p1w, p2w);
-    vec3 bary_x1 = pixel_bary(coord + ivec2(1, 0), size, inv_proj_view, camera_position, p0w, p1w, p2w);
-    vec3 bary_y1 = pixel_bary(coord + ivec2(0, 1), size, inv_proj_view, camera_position, p0w, p1w, p2w);
-
-    vec3 bary_ddx = bary_x1 - bary;
-    vec3 bary_ddy = bary_y1 - bary;
-
-    vec2 uv0 = push.uv_buffer.uvs[tri.x];
-    vec2 uv1 = push.uv_buffer.uvs[tri.y];
-    vec2 uv2 = push.uv_buffer.uvs[tri.z];
-
-    vec2 uv = bary.x * uv0 + bary.y * uv1 + bary.z * uv2;
-    uv.y = 1.0 - uv.y;
-
-    // derivative of (1 - uv.y) is -(d uv.y), so negate the y component
-    vec2 uv_ddx = bary_ddx.x * uv0 + bary_ddx.y * uv1 + bary_ddx.z * uv2;
-    vec2 uv_ddy = bary_ddy.x * uv0 + bary_ddy.y * uv1 + bary_ddy.z * uv2;
-    uv_ddx.y = -uv_ddx.y;
-    uv_ddy.y = -uv_ddy.y;
-
-    vec3 n0 = push.normal_buffer.normals[tri.x];
-    vec3 n1 = push.normal_buffer.normals[tri.y];
-    vec3 n2 = push.normal_buffer.normals[tri.z];
     // world normal, transformed up front it can serve both normal mapping and SSAO
-    vec3 normal = normalize(mat3(draw.transform) * (bary.x * n0 + bary.y * n1 + bary.z * n2));
+    vec3 normal = interpolate_normal(push.normal_buffer, hit.indices, hit.bary, hit.draw.transform);
 
-    vec4 t0 = push.tangent_buffer.tangents[tri.x];
-    vec4 t1 = push.tangent_buffer.tangents[tri.y];
-    vec4 t2 = push.tangent_buffer.tangents[tri.z];
-    vec3 tangent = normalize(mat3(draw.transform) * (bary.x * t0.xyz + bary.y * t1.xyz + bary.z * t2.xyz));
+    vec4 t0 = push.tangent_buffer.tangents[hit.indices.x];
+    vec4 t1 = push.tangent_buffer.tangents[hit.indices.y];
+    vec4 t2 = push.tangent_buffer.tangents[hit.indices.z];
+    vec3 tangent = normalize(mat3(hit.draw.transform) * (hit.bary.x * t0.xyz + hit.bary.y * t1.xyz + hit.bary.z * t2.xyz));
     tangent = normalize(tangent - dot(tangent, normal) * normal);
     vec3 bitangent = cross(normal, tangent) * t0.w;
     mat3 TBN = mat3(tangent, bitangent, normal);
@@ -148,8 +121,7 @@ void main() {
     }
 
     // directional shadow mapping
-    vec3 world_pos = bary.x * p0w + bary.y * p1w + bary.z * p2w;
-    vec3 ray_origin = world_pos + surface.normal * NORMAL_BIAS;
+    vec3 ray_origin = hit.world_pos + surface.normal * NORMAL_BIAS;
     float shadow = float(!trace_occluded(tlas, ray_origin, frame_data.light_dir, 1000.0));
 
     // ambient occlusion
@@ -157,9 +129,9 @@ void main() {
     float ao = texture(TEX_UNI(push.ssao_image, frame_data.texture_sampler), screen_uv).r;
 
     // indirect diffuse from the probe grid
-    vec3 view_dir = normalize(camera_position - world_pos);
+    vec3 view_dir = normalize(frame_data.camera_position - hit.world_pos);
     vec3 indirect_irradiance = sample_probe_irradiance(
-            push.probe_sh_buffer, push.probe_position_buffer, world_pos, surface.normal, view_dir,
+            push.probe_sh_buffer, push.probe_position_buffer, hit.world_pos, surface.normal, view_dir,
             frame_data.grid_min, frame_data.grid_spacing, frame_data.probe_counts
         );
 
@@ -182,7 +154,7 @@ void main() {
     #elif DEBUG_VIEW == DEBUG_VIEW_GI
     debug_color = indirect_irradiance;
     #elif DEBUG_VIEW == DEBUG_VIEW_VIS
-    debug_color = id_to_color(triangle_id);
+    debug_color = id_to_color(hit.triangle_id);
     #endif
     imageStore(F32_UNI(push.draw_image), coord, vec4(debug_color, 1.0));
     return;

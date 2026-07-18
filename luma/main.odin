@@ -96,6 +96,8 @@ main :: proc() {
 
 	camera := create_default_camera()
 	camera_update_proj(&camera, f32(window.width) / f32(window.height))
+	// seeds zero velocity on the first frame instead of a zeroed matrix's garbage
+	rd.prev_proj_view = camera.proj * camera_get_view(&camera)
 
 	light_dir := glsl.vec3{0.1, 1.0, -0.1}
 	light_color := glsl.vec3{1.0, 1.0, 1.0}
@@ -182,6 +184,7 @@ main :: proc() {
 		frame_data := Frame_Data {
 			proj_view         = proj_view,
 			inv_proj_view     = glsl.inverse(proj_view),
+			prev_proj_view    = rd.prev_proj_view,
 			camera_position   = camera.position,
 			texture_sampler   = rd.texture_sampler_idx,
 			light_dir         = glsl.normalize(light_dir),
@@ -203,6 +206,7 @@ main :: proc() {
 		}
 		frame_data_buffer := &rd.frame_data_buffers[handle.buffer_idx]
 		mem.copy(frame_data_buffer.mapped, &frame_data, size_of(Frame_Data))
+		rd.prev_proj_view = proj_view
 
 		rd.frame = {
 			frame_data_buffer = frame_data_buffer,

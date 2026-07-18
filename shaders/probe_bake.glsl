@@ -1,12 +1,12 @@
 #version 460 core
 
-#extension GL_EXT_ray_query : require
-
 #include "luma.glsl"
 #include "types.glsl"
 #include "random.glsl"
 #include "probe_global.glsl"
-#include "hit_utils.glsl"
+#include "utils/triangle_utils.glsl"
+#include "utils/material_utils.glsl"
+#include "utils/ray_utils.glsl"
 
 #define WORKGROUP_SIZE 64
 #define SAMPLES_PER_PROBE 256
@@ -60,10 +60,7 @@ vec3 trace(vec3 origin, vec3 dir, FrameData frame_data) {
     // push bounce albedo toward white to fake lost bounces
     albedo = pow(albedo, vec3(1.0 / frame_data.albedo_boost));
 
-    vec3 n0 = push.normal_buffer.normals[tri.x];
-    vec3 n1 = push.normal_buffer.normals[tri.y];
-    vec3 n2 = push.normal_buffer.normals[tri.z];
-    vec3 normal = normalize(mat3(draw.transform) * (bary.x * n0 + bary.y * n1 + bary.z * n2));
+    vec3 normal = interpolate_normal(push.normal_buffer, tri, bary, draw.transform);
     // face the ray, else the bias pushes hit_pos into the surface
     if (dot(normal, dir) > 0.0) {
         normal = -normal;

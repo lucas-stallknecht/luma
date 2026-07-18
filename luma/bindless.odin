@@ -21,10 +21,12 @@ BINDLESS_STORAGE_RGBA8_BINDING :: 4
 BINDLESS_STORAGE_R8_BINDING :: 5
 BINDLESS_TEXTURE_CUBE_BINDING :: 6
 BINDLESS_STORAGE_F32_ARRAY_BINDING :: 7
+BINDLESS_STORAGE_RG16F_BINDING :: 8
 
 bindless_init :: proc(d: ^Device) {
 	common_binding_flags := vk.DescriptorBindingFlags{.UPDATE_AFTER_BIND, .PARTIALLY_BOUND}
 	desc_binding_flags_arr := [?]vk.DescriptorBindingFlags {
+		common_binding_flags,
 		common_binding_flags,
 		common_binding_flags,
 		common_binding_flags,
@@ -94,6 +96,12 @@ bindless_init :: proc(d: ^Device) {
 			binding = BINDLESS_STORAGE_F32_ARRAY_BINDING,
 			descriptorType = .STORAGE_IMAGE,
 			descriptorCount = MAX_STORAGE_ARRAY_IMAGES,
+			stageFlags = stage_flags,
+		},
+		{
+			binding = BINDLESS_STORAGE_RG16F_BINDING,
+			descriptorType = .STORAGE_IMAGE,
+			descriptorCount = MAX_BINDLESS_IMAGES,
 			stageFlags = stage_flags,
 		},
 	}
@@ -248,6 +256,10 @@ storage_image_binding_and_slot :: proc(
 		binding = BINDLESS_STORAGE_R8_BINDING
 		slot = d.bindless_next.storage_r8
 		d.bindless_next.storage_r8 += 1
+	case .R16G16_SFLOAT:
+		binding = BINDLESS_STORAGE_RG16F_BINDING
+		slot = d.bindless_next.storage_rg16f
+		d.bindless_next.storage_rg16f += 1
 	case:
 		fmt.panicf(
 			"[Device] No bindless storage array for format %v - add one in luma.glsl and a case here",

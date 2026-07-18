@@ -1,11 +1,10 @@
 #version 460 core
 
-#extension GL_EXT_ray_query : require
-
 #include "luma.glsl"
 #include "types.glsl"
 #include "random.glsl"
-#include "hit_utils.glsl"
+#include "utils/visbuffer_utils.glsl"
+#include "utils/ray_utils.glsl"
 
 #define NORMAL_BIAS 0.001
 #define SSAO_N_SAMPLES 4
@@ -33,44 +32,25 @@ void main() {
     ivec2 vis_size = imageSize(U32(push.visbuffer));
     ivec2 vis_coord = ivec2((vec2(coord) + 0.5) * vec2(vis_size) / vec2(ao_size));
 
-    uvec4 pix = imageLoad(U32(push.visbuffer), vis_coord);
-    uint triangle_id = pix.r;
+    FrameData frame_data = push.frame_data.data;
+    VisbufferHit hit = decode_visbuffer_hit(
+            push.visbuffer, vis_coord, vis_size,
+            push.draw_data_buffer, push.index_buffer, push.vertex_buffer,
+            frame_data.inv_proj_view, frame_data.camera_position
+        );
 
-    if (triangle_id == 0) {
+    if (!hit.valid) {
         imageStore(R8_UNI(push.ssao_image), coord, vec4(1.0));
         return;
     }
 
-    FrameData frame_data = push.frame_data.data;
-    DrawData draw = push.draw_data_buffer.draw_data[pix.g];
-
-    uint triangle_idx = triangle_id - 1;
-    uvec3 tri = fetch_triangle_indices(push.index_buffer, triangle_idx);
-
-    vec3 p0 = push.vertex_buffer.positions[tri.x];
-    vec3 p1 = push.vertex_buffer.positions[tri.y];
-    vec3 p2 = push.vertex_buffer.positions[tri.z];
-
-    vec3 p0w = vec3(draw.transform * vec4(p0, 1.0));
-    vec3 p1w = vec3(draw.transform * vec4(p1, 1.0));
-    vec3 p2w = vec3(draw.transform * vec4(p2, 1.0));
-
-    mat4 inv_proj_view = frame_data.inv_proj_view;
-    vec3 camera_position = frame_data.camera_position;
-
-    vec3 bary = pixel_bary(vis_coord, vis_size, inv_proj_view, camera_position, p0w, p1w, p2w);
-    vec3 world_pos = bary.x * p0w + bary.y * p1w + bary.z * p2w;
-
-    vec3 n0 = push.normal_buffer.normals[tri.x];
-    vec3 n1 = push.normal_buffer.normals[tri.y];
-    vec3 n2 = push.normal_buffer.normals[tri.z];
-    vec3 normal = normalize(mat3(draw.transform) * (bary.x * n0 + bary.y * n1 + bary.z * n2));
+    vec3 normal = interpolate_normal(push.normal_buffer, hit.indices, hit.bary, hit.draw.transform);
 
     // cosine-weighted samples are rotationally symmetric, so any basis around normal works
     mat3 onb = build_onb(normal);
-    vec3 ray_origin = world_pos + normal * NORMAL_BIAS;
+    vec3 ray_origin = hit.world_pos + normal * NORMAL_BIAS;
 
-    uint ao_seed = hash_uint3(floatBitsToUint(world_pos));
+    uint ao_seed = hash_uint3(floatBitsToUint(hit.world_pos));
     float acc = 0.0;
     for (int i = 0; i < SSAO_N_SAMPLES; i++) {
         uint sample_seed = ao_seed ^ (uint(i) * 0x9E3779B9u);

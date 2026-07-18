@@ -16,6 +16,7 @@ layout(set = 0, binding = 5, r8) uniform image2D images_r8[];
 
 layout(set = 0, binding = 6) uniform textureCube cube_textures[];
 layout(set = 0, binding = 7, rgba32f) uniform image2DArray images_f32_array[];
+layout(set = 0, binding = 8, rg16f) uniform image2D images_rg16f[];
 
 #define SAMP(idx) samplers[nonuniformEXT(idx)]
 #define U32(idx) images_u32[nonuniformEXT(idx)]
@@ -23,12 +24,14 @@ layout(set = 0, binding = 7, rgba32f) uniform image2DArray images_f32_array[];
 #define RGBA8(idx) images_rgba8[nonuniformEXT(idx)]
 #define R8(idx) images_r8[nonuniformEXT(idx)]
 #define F32_ARRAY(idx) images_f32_array[nonuniformEXT(idx)]
+#define RG16F(idx) images_rg16f[nonuniformEXT(idx)]
 #define SAMP_UNI(idx) samplers[idx]
 #define U32_UNI(idx) images_u32[idx]
 #define F32_UNI(idx) images_f32[idx]
 #define RGBA8_UNI(idx) images_rgba8[idx]
 #define R8_UNI(idx) images_r8[idx]
 #define F32_ARRAY_UNI(idx) images_f32_array[idx]
+#define RG16F_UNI(idx) images_rg16f[idx]
 
 // glue a texture index and a sampler index together into something we can texture() with
 #define TEX(tex_idx, samp_idx) sampler2D(textures[nonuniformEXT(tex_idx)], samplers[nonuniformEXT(samp_idx)])

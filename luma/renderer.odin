@@ -12,6 +12,7 @@ BLOOM_MIP_COUNT :: 4
 Frame_Data :: struct {
 	proj_view:         glsl.mat4,
 	inv_proj_view:     glsl.mat4,
+	prev_proj_view:    glsl.mat4,
 	camera_position:   glsl.vec3,
 	texture_sampler:   u32,
 	light_dir:         glsl.vec3,
@@ -67,6 +68,15 @@ Ssao_Push :: struct {
 	normal_buffer:    vk.DeviceAddress,
 }
 
+Motion_Vectors_Push :: struct {
+	frame_data:       vk.DeviceAddress,
+	visbuffer:        u32,
+	velocity_image:   u32,
+	index_buffer:     vk.DeviceAddress,
+	vertex_buffer:    vk.DeviceAddress,
+	draw_data_buffer: vk.DeviceAddress,
+}
+
 Shading_Push :: struct {
 	frame_data:            vk.DeviceAddress,
 	visbuffer:             u32,
@@ -108,6 +118,7 @@ Present_Push :: struct {
 	bloom_texture:   u32,
 	bloom_sampler:   u32,
 	bloom_intensity: f32,
+	velocity_image:  u32,
 }
 
 Probe_Debug_Push :: struct {
@@ -134,6 +145,9 @@ Renderer :: struct {
 	ssao_pipeline:             ^Compute_Pipeline,
 	ssao_image:                Image,
 	ssao_image_tex_idx:        u32,
+	motion_vectors_pipeline:   ^Compute_Pipeline,
+	velocity_image:            Image,
+	prev_proj_view:            glsl.mat4,
 	shading_pipeline:          ^Compute_Pipeline,
 	draw_image:                Image,
 	draw_image_tex_idx:        u32,
@@ -300,6 +314,27 @@ renderer_init :: proc(
 	)
 	rd.ssao_image_tex_idx = bindless_register_texture(device, rd.ssao_image.view)
 
+	rd.motion_vectors_pipeline = pipeline_manager_add_compute(
+		&rd.pipeline_manager,
+		{
+			name = "motion_vectors",
+			shader = "motion_vectors.glsl",
+			push_constant_size = size_of(Motion_Vectors_Push),
+		},
+	)
+	rd.velocity_image = create_image(
+		device,
+		init_cb,
+		{
+			width = window.width,
+			height = window.height,
+			format = .R16G16_SFLOAT,
+			usage = {.STORAGE},
+			memory = .GPU_ONLY,
+			register_bindless = .Storage,
+		},
+	)
+
 	rd.shading_pipeline = pipeline_manager_add_compute(
 		&rd.pipeline_manager,
 		{
@@ -442,6 +477,7 @@ renderer_cleanup :: proc(rd: ^Renderer) {
 	destroy_image(rd.device, rd.visbuffer)
 	destroy_image(rd.device, rd.depth_image)
 	destroy_image(rd.device, rd.ssao_image)
+	destroy_image(rd.device, rd.velocity_image)
 	destroy_image(rd.device, rd.draw_image)
 	destroy_image(rd.device, rd.bloom_image)
 	destroy_image(rd.device, rd.bloom_scratch)
@@ -575,6 +611,32 @@ ssao_pass :: proc(resources: []Render_Resource, user_data: rawptr, cb: vk.Comman
 		(rd.frame.height / SSAO_RES_DIVISOR + 7) / 8,
 		1,
 	)
+}
+
+motion_vectors_pass :: proc(
+	resources: []Render_Resource,
+	user_data: rawptr,
+	cb: vk.CommandBuffer,
+) {
+	rd := cast(^Renderer)user_data
+	pc := Motion_Vectors_Push {
+		frame_data       = rd.frame.frame_data_buffer.device_address,
+		visbuffer        = rd.visbuffer.bindless_idx,
+		velocity_image   = rd.velocity_image.bindless_idx,
+		index_buffer     = rd.frame.scene.index_buffer.device_address,
+		vertex_buffer    = rd.frame.scene.position_buffer.device_address,
+		draw_data_buffer = rd.frame.scene.draw_data_buffer.device_address,
+	}
+	vk.CmdPushConstants(
+		cb,
+		rd.motion_vectors_pipeline.layout,
+		{.COMPUTE},
+		0,
+		size_of(Motion_Vectors_Push),
+		&pc,
+	)
+	bind_compute_pipeline(cb, rd.motion_vectors_pipeline)
+	vk.CmdDispatch(cb, (rd.frame.width + 7) / 8, (rd.frame.height + 7) / 8, 1)
 }
 
 shading_pass :: proc(resources: []Render_Resource, user_data: rawptr, cb: vk.CommandBuffer) {
@@ -766,6 +828,7 @@ present_pass :: proc(resources: []Render_Resource, user_data: rawptr, cb: vk.Com
 		bloom_texture   = rd.bloom_image.bindless_idx,
 		bloom_sampler   = rd.bloom_sampler_idx,
 		bloom_intensity = rd.frame.bloom_intensity,
+		velocity_image  = rd.velocity_image.bindless_idx,
 	}
 	vk.CmdPushConstants(
 		cb,
@@ -868,6 +931,21 @@ renderer_draw :: proc(
 
 	render_graph_add_pass(
 		&rd.rg,
+		"motion_vectors",
+		motion_vectors_pass,
+		rd,
+		{
+			target = &rd.visbuffer,
+			usage = {stage = {.COMPUTE_SHADER}, access = {.SHADER_STORAGE_READ}},
+		},
+		{
+			target = &rd.velocity_image,
+			usage = {stage = {.COMPUTE_SHADER}, access = {.SHADER_STORAGE_WRITE}},
+		},
+	)
+
+	render_graph_add_pass(
+		&rd.rg,
 		"ssao",
 		ssao_pass,
 		rd,
@@ -937,6 +1015,10 @@ renderer_draw :: proc(
 		{
 			target = &rd.bloom_image,
 			usage = {stage = {.FRAGMENT_SHADER}, access = {.SHADER_SAMPLED_READ}},
+		},
+		{
+			target = &rd.velocity_image,
+			usage = {stage = {.FRAGMENT_SHADER}, access = {.SHADER_STORAGE_READ}},
 		},
 		{
 			target = &rd.frame.gi.probe_sh_buffer,
