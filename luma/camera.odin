@@ -4,6 +4,8 @@ import "core:math"
 import la "core:math/linalg"
 import "core:math/linalg/glsl"
 
+TAA_JITTER_SAMPLES :: 8
+
 Camera :: struct {
 	near:             f32,
 	far:              f32,
@@ -38,6 +40,24 @@ camera_update_proj :: proc(cam: ^Camera, aspect_ratio: f32) {
 	)
 	// Vulkan's clip space has Y pointing down, unlike OpenGL
 	cam.proj[1][1] *= -1.0
+}
+
+// a subpixel shift so TAA samples the scene slightly differently each frame. the Halton
+// sequence spreads the shifts out evenly
+camera_taa_jitter :: proc(frame_idx: u32) -> glsl.vec2 {
+	// start at 1: Halton's sample 0 is zero
+	i := frame_idx % TAA_JITTER_SAMPLES + 1
+	return {halton(i, 2) - 0.5, halton(i, 3) - 0.5}
+}
+
+// applies the jitter to the projection so the whole image shifts by that amount. the matrix
+// stays invertible, so world positions can still be reconstructed from it
+camera_jittered_proj :: proc(cam: ^Camera, jitter_ndc: glsl.vec2) -> glsl.mat4 {
+	proj := cam.proj
+	// these two cells add a screen-space shift of jitter_ndc
+	proj[2][0] += jitter_ndc.x
+	proj[2][1] += jitter_ndc.y
+	return proj
 }
 
 camera_get_view :: proc(cam: ^Camera) -> glsl.mat4 {
@@ -81,4 +101,17 @@ camera_rotate :: proc(cam: ^Camera, delta: glsl.vec2) {
 	cam.rotation = pitch_quat * cam.rotation
 
 	cam.rotation = la.normalize(cam.rotation)
+}
+
+@(private = "file")
+halton :: proc(index: u32, base: u32) -> f32 {
+	f: f32 = 1.0
+	r: f32 = 0.0
+	i := index
+	for i > 0 {
+		f /= f32(base)
+		r += f * f32(i % base)
+		i /= base
+	}
+	return r
 }

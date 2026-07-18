@@ -116,6 +116,7 @@ main :: proc() {
 	last_frame_time: f64 = glfw.GetTime()
 	reload_key_prev: bool = false
 	bake_accum: f32 = GI_BAKE_INTERVAL
+	prev_jitter: glsl.vec2 = {}
 
 	for !window_should_close(&window) {
 		window_update(&window)
@@ -180,7 +181,12 @@ main :: proc() {
 		swapchain_image := swapchain_acquire_image(&swapchain)
 		handle, cb := command_handler_acquire(&device.command_handler)
 
-		proj_view := camera.proj * camera_get_view(&camera)
+		jitter_px := camera_taa_jitter(u32(swapchain.frame_idx))
+		jitter := glsl.vec2 {
+			jitter_px.x * 2.0 / f32(window.width),
+			jitter_px.y * 2.0 / f32(window.height),
+		}
+		proj_view := camera_jittered_proj(&camera, jitter) * camera_get_view(&camera)
 		frame_data := Frame_Data {
 			proj_view         = proj_view,
 			inv_proj_view     = glsl.inverse(proj_view),
@@ -224,7 +230,10 @@ main :: proc() {
 			show_probes = show_probes,
 			bloom_intensity = bloom_intensity,
 			bloom_filter_radius = bloom_filter_radius,
+			jitter = jitter,
+			prev_jitter = prev_jitter,
 		}
+		prev_jitter = jitter
 
 		renderer_draw(&rd, cb, swapchain_image, &scene, &gi)
 		swapchain_barrier_to_present(cb, swapchain_image)

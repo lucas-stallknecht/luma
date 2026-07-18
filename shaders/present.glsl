@@ -24,7 +24,7 @@ void vert_main() {
 #define DEBUG_VIEW DEBUG_VIEW_NONE
 
 layout(push_constant) uniform PushConstants {
-    uint draw_image;
+    uint taa_image;
     uint bloom_texture;
     uint bloom_sampler;
     float bloom_intensity;
@@ -64,9 +64,9 @@ void frag_main() {
     return;
     #endif
 
-    vec4 hdr_color = imageLoad(F32_UNI(push.draw_image), coord);
+    vec4 hdr_color = imageLoad(F32_UNI(push.taa_image), coord);
 
-    vec2 uv = (vec2(coord) + 0.5) / vec2(imageSize(F32_UNI(push.draw_image)));
+    vec2 uv = (vec2(coord) + 0.5) / vec2(imageSize(F32_UNI(push.taa_image)));
     vec3 bloom_color = textureLod(TEX_UNI(push.bloom_texture, push.bloom_sampler), uv, 0.0).rgb;
     hdr_color.rgb = mix(hdr_color.rgb, bloom_color, push.bloom_intensity);
 

@@ -78,6 +78,16 @@ Motion_Vectors_Push :: struct {
 	index_buffer:     vk.DeviceAddress,
 	vertex_buffer:    vk.DeviceAddress,
 	draw_data_buffer: vk.DeviceAddress,
+	jitter:           glsl.vec2, // this frame's projection jitter, in NDC
+	prev_jitter:      glsl.vec2,
+}
+
+Taa_Push :: struct {
+	draw_image:     u32, // this frame's aliased shading output
+	prev_taa_image: u32, // last frame's resolved history
+	sampler:        u32, // linear clamp, for reprojected history reads
+	velocity_image: u32,
+	taa_image:      u32, // resolved output
 }
 
 Shading_Push :: struct {
@@ -117,7 +127,7 @@ Bloom_Upsample_Push :: struct {
 }
 
 Present_Push :: struct {
-	draw_image:      u32,
+	taa_image:       u32,
 	bloom_texture:   u32,
 	bloom_sampler:   u32,
 	bloom_intensity: f32,
@@ -157,6 +167,9 @@ Renderer :: struct {
 	shading_pipeline:          ^Compute_Pipeline,
 	draw_image:                Image,
 	draw_image_tex_idx:        u32,
+	taa_pipeline:              ^Compute_Pipeline,
+	taa_image:                 Image,
+	prev_taa_image:            Image,
 	texture_sampler:           vk.Sampler,
 	texture_sampler_idx:       u32,
 	bloom_downsample_pipeline: ^Compute_Pipeline,
@@ -182,6 +195,8 @@ Renderer :: struct {
 		show_probes:         bool,
 		bloom_intensity:     f32,
 		bloom_filter_radius: f32,
+		jitter:              glsl.vec2,
+		prev_jitter:         glsl.vec2,
 	},
 }
 
@@ -373,12 +388,43 @@ renderer_init :: proc(
 			width = window.width,
 			height = window.height,
 			format = .R32G32B32A32_SFLOAT,
-			usage = {.TRANSFER_SRC, .STORAGE, .SAMPLED},
+			usage = {.STORAGE, .SAMPLED},
 			memory = .GPU_ONLY,
 			register_bindless = .Storage,
 		},
 	)
+	// bloom samples draw_image (pre-TAA) so it only depends on shading, not on the TAA pass
 	rd.draw_image_tex_idx = bindless_register_texture(device, rd.draw_image.view)
+
+	// TAA blends the aliased draw_image with the reprojected history into taa_image, which
+	// then feeds present. taa_image only needs storage (present) and transfer (history copy)
+	rd.taa_pipeline = pipeline_manager_add_compute(
+		&rd.pipeline_manager,
+		{name = "taa", shader = "taa.glsl", push_constant_size = size_of(Taa_Push)},
+	)
+	taa_image_desc := Image_Create_Desc {
+		width             = window.width,
+		height            = window.height,
+		format            = .R32G32B32A32_SFLOAT,
+		usage             = {.TRANSFER_SRC, .STORAGE},
+		memory            = .GPU_ONLY,
+		register_bindless = .Storage,
+	}
+	rd.taa_image = create_image(device, init_cb, taa_image_desc)
+	taa_image_desc.usage = {.TRANSFER_DST, .SAMPLED}
+	taa_image_desc.register_bindless = .Texture
+	rd.prev_taa_image = create_image(device, init_cb, taa_image_desc)
+	// the neighborhood clamp keeps a garbage first frame in check, but zero it anyway so
+	// startup is always the same
+	taa_clear_color := vk.ClearColorValue{}
+	vk.CmdClearColorImage(
+		init_cb,
+		rd.prev_taa_image.image,
+		.GENERAL,
+		&taa_clear_color,
+		1,
+		&rtao_clear_range,
+	)
 
 	// mip 0 = half screen res
 	rd.bloom_downsample_pipeline = pipeline_manager_add_compute(
@@ -503,6 +549,8 @@ renderer_cleanup :: proc(rd: ^Renderer) {
 	destroy_image(rd.device, rd.prev_depth_image)
 	destroy_image(rd.device, rd.velocity_image)
 	destroy_image(rd.device, rd.draw_image)
+	destroy_image(rd.device, rd.taa_image)
+	destroy_image(rd.device, rd.prev_taa_image)
 	destroy_image(rd.device, rd.bloom_image)
 	destroy_image(rd.device, rd.bloom_scratch)
 	for i in 0 ..< int(MAX_COMMAND_BUFFERS) {
@@ -671,6 +719,21 @@ history_copy_pass :: proc(resources: []Render_Resource, user_data: rawptr, cb: v
 		1,
 		&depth_copy_region,
 	)
+
+	taa_copy_region := vk.ImageCopy {
+		srcSubresource = {aspectMask = {.COLOR}, layerCount = 1},
+		dstSubresource = {aspectMask = {.COLOR}, layerCount = 1},
+		extent = {rd.frame.width, rd.frame.height, 1},
+	}
+	vk.CmdCopyImage(
+		cb,
+		rd.taa_image.image,
+		.GENERAL,
+		rd.prev_taa_image.image,
+		.GENERAL,
+		1,
+		&taa_copy_region,
+	)
 }
 
 motion_vectors_pass :: proc(
@@ -686,6 +749,8 @@ motion_vectors_pass :: proc(
 		index_buffer     = rd.frame.scene.index_buffer.device_address,
 		vertex_buffer    = rd.frame.scene.position_buffer.device_address,
 		draw_data_buffer = rd.frame.scene.draw_data_buffer.device_address,
+		jitter           = rd.frame.jitter,
+		prev_jitter      = rd.frame.prev_jitter,
 	}
 	vk.CmdPushConstants(
 		cb,
@@ -718,6 +783,20 @@ shading_pass :: proc(resources: []Render_Resource, user_data: rawptr, cb: vk.Com
 	}
 	vk.CmdPushConstants(cb, rd.shading_pipeline.layout, {.COMPUTE}, 0, size_of(Shading_Push), &pc)
 	bind_compute_pipeline(cb, rd.shading_pipeline)
+	vk.CmdDispatch(cb, (rd.frame.width + 7) / 8, (rd.frame.height + 7) / 8, 1)
+}
+
+taa_pass :: proc(resources: []Render_Resource, user_data: rawptr, cb: vk.CommandBuffer) {
+	rd := cast(^Renderer)user_data
+	pc := Taa_Push {
+		draw_image     = rd.draw_image.bindless_idx,
+		prev_taa_image = rd.prev_taa_image.bindless_idx,
+		sampler        = rd.bloom_sampler_idx,
+		velocity_image = rd.velocity_image.bindless_idx,
+		taa_image      = rd.taa_image.bindless_idx,
+	}
+	vk.CmdPushConstants(cb, rd.taa_pipeline.layout, {.COMPUTE}, 0, size_of(Taa_Push), &pc)
+	bind_compute_pipeline(cb, rd.taa_pipeline)
 	vk.CmdDispatch(cb, (rd.frame.width + 7) / 8, (rd.frame.height + 7) / 8, 1)
 }
 
@@ -884,7 +963,7 @@ present_pass :: proc(resources: []Render_Resource, user_data: rawptr, cb: vk.Com
 	vk.CmdSetScissorWithCount(cb, 1, &rd.frame.render_area)
 
 	present_pc := Present_Push {
-		draw_image      = rd.draw_image.bindless_idx,
+		taa_image       = rd.taa_image.bindless_idx,
 		bloom_texture   = rd.bloom_image.bindless_idx,
 		bloom_sampler   = rd.bloom_sampler_idx,
 		bloom_intensity = rd.frame.bloom_intensity,
@@ -1033,17 +1112,6 @@ renderer_draw :: proc(
 
 	render_graph_add_pass(
 		&rd.rg,
-		"history_copy",
-		history_copy_pass,
-		rd,
-		{target = &rd.rtao_image, usage = {stage = {.TRANSFER}, access = {.TRANSFER_READ}}},
-		{target = &rd.prev_rtao_image, usage = {stage = {.TRANSFER}, access = {.TRANSFER_WRITE}}},
-		{target = &rd.depth_image, usage = {stage = {.TRANSFER}, access = {.TRANSFER_READ}}},
-		{target = &rd.prev_depth_image, usage = {stage = {.TRANSFER}, access = {.TRANSFER_WRITE}}},
-	)
-
-	render_graph_add_pass(
-		&rd.rg,
 		"shading",
 		shading_pass,
 		rd,
@@ -1071,10 +1139,48 @@ renderer_draw :: proc(
 
 	render_graph_add_pass(
 		&rd.rg,
+		"taa",
+		taa_pass,
+		rd,
+		{
+			target = &rd.draw_image,
+			usage = {stage = {.COMPUTE_SHADER}, access = {.SHADER_STORAGE_READ}},
+		},
+		{
+			target = &rd.velocity_image,
+			usage = {stage = {.COMPUTE_SHADER}, access = {.SHADER_STORAGE_READ}},
+		},
+		{
+			target = &rd.prev_taa_image,
+			usage = {stage = {.COMPUTE_SHADER}, access = {.SHADER_SAMPLED_READ}},
+		},
+		{
+			target = &rd.taa_image,
+			usage = {stage = {.COMPUTE_SHADER}, access = {.SHADER_STORAGE_WRITE}},
+		},
+	)
+
+	// preserve this frame's rtao, depth and resolved TAA output for next frame to reproject
+	render_graph_add_pass(
+		&rd.rg,
+		"history_copy",
+		history_copy_pass,
+		rd,
+		{target = &rd.rtao_image, usage = {stage = {.TRANSFER}, access = {.TRANSFER_READ}}},
+		{target = &rd.prev_rtao_image, usage = {stage = {.TRANSFER}, access = {.TRANSFER_WRITE}}},
+		{target = &rd.depth_image, usage = {stage = {.TRANSFER}, access = {.TRANSFER_READ}}},
+		{target = &rd.prev_depth_image, usage = {stage = {.TRANSFER}, access = {.TRANSFER_WRITE}}},
+		{target = &rd.taa_image, usage = {stage = {.TRANSFER}, access = {.TRANSFER_READ}}},
+		{target = &rd.prev_taa_image, usage = {stage = {.TRANSFER}, access = {.TRANSFER_WRITE}}},
+	)
+
+	render_graph_add_pass(
+		&rd.rg,
 		"bloom",
 		bloom_pass,
 		rd,
-		// bloom_downsample samples draw_image through a plain texture view (mip 0 only)
+		// bloom_downsample samples draw_image (pre-TAA) through a plain texture view (mip 0 only)
+		// reading it pre-TAA means bloom waits only on shading, not on the TAA pass so it can run in parallel
 		{
 			target = &rd.draw_image,
 			usage = {stage = {.COMPUTE_SHADER}, access = {.SHADER_SAMPLED_READ}},
@@ -1090,9 +1196,8 @@ renderer_draw :: proc(
 		"present",
 		present_pass,
 		rd,
-		// present.glsl reads draw_image back through the storage view, not the texture one
 		{
-			target = &rd.draw_image,
+			target = &rd.taa_image,
 			usage = {stage = {.FRAGMENT_SHADER}, access = {.SHADER_STORAGE_READ}},
 		},
 		{

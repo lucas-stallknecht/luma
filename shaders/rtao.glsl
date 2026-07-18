@@ -72,12 +72,9 @@ void main() {
     vec2 ao_uv = (vec2(coord) + 0.5) / vec2(ao_size);
     vec2 history_uv = ao_uv - velocity;
 
-    // exclude out of bounds reprojection, and reject if this point's depth last frame
-    // (predicted from its current world position, assuming static geometry) doesn't match
-    // what was actually there
-    //
-    // a mismatch means disocclusion, for example this history texel
-    // belonged to a different surface, and blending it in would smear stale AO across it
+    // skip history that lands off-screen. also compare this point's depth last frame with
+    // what the depth buffer actually held there: if they differ, the history came from a
+    // different surface (disocclusion) and blending it in would smear stale AO
     if (all(greaterThanEqual(history_uv, vec2(0.0))) && all(lessThan(history_uv, vec2(1.0)))) {
         vec4 predicted_prev_clip = frame_data.prev_proj_view * vec4(hit.world_pos, 1.0);
         float predicted_prev_depth = predicted_prev_clip.z / predicted_prev_clip.w;

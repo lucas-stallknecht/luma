@@ -11,6 +11,8 @@ layout(push_constant) uniform PushConstants {
     IndexBuffer index_buffer;
     VertexBuffer vertex_buffer;
     DrawDataBuffer draw_data_buffer;
+    vec2 jitter;
+    vec2 prev_jitter;
 } push;
 
 layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
@@ -38,6 +40,12 @@ void main() {
 
     vec2 curr_ndc = curr_clip.xy / curr_clip.w;
     vec2 prev_ndc = prev_clip.xy / prev_clip.w;
+
+    // world_pos was found with the jittered inv_proj_view, so projecting it back already
+    // removes the current frame's jitter and leaves only the previous frame's. adding each
+    // frame's jitter back cancels it out, giving a velocity with no jitter (TAA and RTAO need this)
+    curr_ndc += push.jitter;
+    prev_ndc += push.prev_jitter;
 
     // NDC spans [-1, 1], UV spans [0, 1], so a delta there is half as large in UV space
     vec2 velocity = (curr_ndc - prev_ndc) * 0.5;
