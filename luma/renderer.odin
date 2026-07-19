@@ -314,7 +314,8 @@ renderer_init :: proc(
 		memory = .GPU_ONLY,
 	}
 	rd.depth_image = create_image(device, init_cb, depth_image_desc)
-	depth_image_desc.usage += {.TRANSFER_DST}
+	depth_image_desc.usage += {.TRANSFER_DST, .SAMPLED}
+	depth_image_desc.register_bindless = .Texture
 	rd.prev_depth_image = create_image(device, init_cb, depth_image_desc)
 
 	rd.rtao_pipeline = pipeline_manager_add_compute(
