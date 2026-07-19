@@ -4,11 +4,29 @@ import imgui "../imgui"
 import "core:fmt"
 import "core:math/linalg/glsl"
 import "core:mem"
+import "core:os"
+import "core:strconv"
+import "core:strings"
 import "vendor:glfw"
 import vk "vendor:vulkan"
 
-device_selection_fn :: proc(idx: int, properties: vk.PhysicalDeviceProperties2) -> bool {
-	return idx == 0
+prompt_int :: proc(label: string, default: int) -> int {
+	fmt.printf("%s [%d]: ", label, default)
+	buf: [64]byte
+	n, err := os.read(os.stdin, buf[:])
+	if err != nil || n <= 0 {
+		return default
+	}
+	line := string(buf[:n])
+	if newline := strings.index_byte(line, '\n'); newline >= 0 {
+		line = line[:newline]
+	}
+	trimmed := strings.trim_space(line)
+	if trimmed == "" {
+		return default
+	}
+	value, ok := strconv.parse_int(trimmed)
+	return value if ok else default
 }
 
 handle_camera_inputs :: proc(win: ^Window, cam: ^Camera, dt: f32) {
@@ -50,15 +68,18 @@ main :: proc() {
 		}
 	}
 
+	width, height := 1920, 960
+	when !ODIN_DEBUG {
+		width = max(prompt_int("Window width", width), 1)
+		height = max(prompt_int("Window height", height), 1)
+	}
+
 	window: Window
-	if !window_init(&window) do return
+	if !window_init(&window, u32(width), u32(height)) do return
 	defer window_cleanup(&window)
 
 	device: Device
-	device_init(
-		&device,
-		{enable_validation = ODIN_DEBUG, physical_device_selection_fn = device_selection_fn},
-	)
+	device_init(&device, {enable_validation = ODIN_DEBUG, prompt_gpu = !ODIN_DEBUG})
 	defer device_cleanup(&device)
 
 	swapchain := create_swapchain(

@@ -54,6 +54,7 @@ DEFAULT_PHYSICAL_DEVICE_SELECTION_FN :: proc(
 
 Device_Desc :: struct {
 	enable_validation:            bool,
+	prompt_gpu:                   bool,
 	physical_device_selection_fn: Maybe(
 		proc(idx: int, properties: vk.PhysicalDeviceProperties2) -> bool,
 	),
@@ -116,6 +117,21 @@ device_init :: proc(d: ^Device, desc: Device_Desc) {
 				raw_data(physical_devices),
 			),
 		)
+		chosen_idx := -1
+		if desc.prompt_gpu {
+			fmt.println("[Device] Available GPUs:")
+			for pd, i in physical_devices {
+				props := vk.PhysicalDeviceProperties2 {
+					sType = .PHYSICAL_DEVICE_PROPERTIES_2,
+				}
+				vk.GetPhysicalDeviceProperties2(pd, &props)
+				fmt.printfln("  %d: %s", i, props.properties.deviceName)
+			}
+			chosen_idx = clamp(prompt_int("Select GPU", 0), 0, int(physical_device_count) - 1)
+		}
+
+		selection_fn :=
+			desc.physical_device_selection_fn.? or_else DEFAULT_PHYSICAL_DEVICE_SELECTION_FN
 		for pd, i in physical_devices {
 			d.accel_properties = {
 				sType = .PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_PROPERTIES_KHR,
@@ -130,9 +146,8 @@ device_init :: proc(d: ^Device, desc: Device_Desc) {
 			}
 			vk.GetPhysicalDeviceProperties2(pd, &device_properties)
 
-			selection_fn :=
-				desc.physical_device_selection_fn.? or_else DEFAULT_PHYSICAL_DEVICE_SELECTION_FN
-			if !selection_fn(i, device_properties) do continue
+			selected := i == chosen_idx if chosen_idx >= 0 else selection_fn(i, device_properties)
+			if !selected do continue
 
 			d.physical_device = pd
 			fmt.printfln("[Device] Selected device: %s", device_properties.properties.deviceName)
