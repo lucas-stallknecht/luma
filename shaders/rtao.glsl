@@ -8,8 +8,8 @@
 
 #define NORMAL_BIAS 0.001
 #define RTAO_N_SAMPLES 4
-#define RTAO_HISTORY_WEIGHT 0.9
-#define RTAO_DEPTH_REJECT_THRESHOLD 0.002
+#define RTAO_HISTORY_WEIGHT 0.95
+#define RTAO_DEPTH_REJECT_FACTOR 0.01
 
 layout(binding = 0, set = 1) uniform accelerationStructureEXT tlas;
 
@@ -72,15 +72,19 @@ void main() {
     vec2 ao_uv = (vec2(coord) + 0.5) / vec2(ao_size);
     vec2 history_uv = ao_uv - velocity;
 
-    // skip history that lands off-screen. also compare this point's depth last frame with
-    // what the depth buffer actually held there: if they differ, the history came from a
-    // different surface (disocclusion) and blending it in would smear stale AO
+    // skip history that lands off-screen. otherwise reconstruct where the reprojected sample
+    // sat in world space last frame: if it's far from this surface the history came from a
+    // different one (disocclusion) and blending it would smear stale AO.
+    //
+    // distance is compared in world units (scaled by view depth) rather than raw depth, which on grazing/half-res
+    // surfaces mismatches enough to falsely reject and break accumulation
     if (all(greaterThanEqual(history_uv, vec2(0.0))) && all(lessThan(history_uv, vec2(1.0)))) {
-        vec4 predicted_prev_clip = frame_data.prev_proj_view * vec4(hit.world_pos, 1.0);
-        float predicted_prev_depth = predicted_prev_clip.z / predicted_prev_clip.w;
         float actual_prev_depth = texture(TEX_UNI(push.prev_depth_image, frame_data.texture_sampler), history_uv).r;
+        vec4 prev_world_h = frame_data.prev_inv_proj_view * vec4(history_uv * 2.0 - 1.0, actual_prev_depth, 1.0);
+        vec3 prev_world = prev_world_h.xyz / prev_world_h.w;
 
-        if (abs(predicted_prev_depth - actual_prev_depth) < RTAO_DEPTH_REJECT_THRESHOLD) {
+        float reject_dist = RTAO_DEPTH_REJECT_FACTOR * distance(frame_data.camera_position, hit.world_pos);
+        if (distance(prev_world, hit.world_pos) < reject_dist) {
             float history_ao = texture(TEX_UNI(push.prev_rtao_image, frame_data.texture_sampler), history_uv).r;
             ao = mix(ao, history_ao, RTAO_HISTORY_WEIGHT);
         }

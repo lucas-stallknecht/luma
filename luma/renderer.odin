@@ -10,10 +10,11 @@ RTAO_RES_DIVISOR :: 2
 BLOOM_MIP_COUNT :: 4
 
 Frame_Data :: struct {
-	proj_view:         glsl.mat4,
-	inv_proj_view:     glsl.mat4,
-	prev_proj_view:    glsl.mat4,
-	camera_position:   glsl.vec3,
+	proj_view:          glsl.mat4,
+	inv_proj_view:      glsl.mat4,
+	prev_proj_view:     glsl.mat4,
+	prev_inv_proj_view: glsl.mat4,
+	camera_position:    glsl.vec3,
 	texture_sampler:   u32,
 	light_dir:         glsl.vec3,
 	albedo_boost:      f32,
@@ -69,6 +70,13 @@ Rtao_Push :: struct {
 	vertex_buffer:    vk.DeviceAddress,
 	draw_data_buffer: vk.DeviceAddress,
 	normal_buffer:    vk.DeviceAddress,
+}
+
+Rtao_Denoise_Push :: struct {
+	frame_data:  vk.DeviceAddress,
+	ao_input:    u32,
+	ao_output:   u32,
+	depth_image: u32,
 }
 
 Motion_Vectors_Push :: struct {
@@ -157,9 +165,13 @@ Renderer :: struct {
 	visbuffer_pipeline:        ^Raster_Pipeline,
 	visbuffer:                 Image,
 	depth_image:               Image,
+	depth_image_tex_idx:       u32,
 	rtao_pipeline:             ^Compute_Pipeline,
+	rtao_denoise_pipeline:     ^Compute_Pipeline,
 	rtao_image:                Image,
 	rtao_image_tex_idx:        u32,
+	rtao_denoised_image:       Image,
+	rtao_denoised_image_tex_idx: u32,
 	prev_rtao_image:           Image,
 	prev_rtao_image_tex_idx:   u32,
 	prev_depth_image:          Image,
@@ -310,11 +322,12 @@ renderer_init :: proc(
 		width  = window.width,
 		height = window.height,
 		format = .D32_SFLOAT,
-		usage  = {.DEPTH_STENCIL_ATTACHMENT, .TRANSFER_SRC},
+		usage  = {.DEPTH_STENCIL_ATTACHMENT, .TRANSFER_SRC, .SAMPLED},
 		memory = .GPU_ONLY,
 	}
 	rd.depth_image = create_image(device, init_cb, depth_image_desc)
-	depth_image_desc.usage += {.TRANSFER_DST, .SAMPLED}
+	rd.depth_image_tex_idx = bindless_register_texture(device, rd.depth_image.view)
+	depth_image_desc.usage += {.TRANSFER_DST}
 	depth_image_desc.register_bindless = .Texture
 	rd.prev_depth_image = create_image(device, init_cb, depth_image_desc)
 
@@ -337,6 +350,8 @@ renderer_init :: proc(
 	}
 	rd.rtao_image = create_image(device, init_cb, rtao_image_desc)
 	rd.rtao_image_tex_idx = bindless_register_texture(device, rd.rtao_image.view)
+	rd.rtao_denoised_image = create_image(device, init_cb, rtao_image_desc)
+	rd.rtao_denoised_image_tex_idx = bindless_register_texture(device, rd.rtao_denoised_image.view)
 	rtao_image_desc.usage += {.TRANSFER_DST}
 	rd.prev_rtao_image = create_image(device, init_cb, rtao_image_desc)
 	rd.prev_rtao_image_tex_idx = bindless_register_texture(device, rd.prev_rtao_image.view)
@@ -356,6 +371,15 @@ renderer_init :: proc(
 		&rtao_clear_color,
 		1,
 		&rtao_clear_range,
+	)
+
+	rd.rtao_denoise_pipeline = pipeline_manager_add_compute(
+		&rd.pipeline_manager,
+		{
+			name = "rtao_denoise",
+			shader = "rtao_denoise.glsl",
+			push_constant_size = size_of(Rtao_Denoise_Push),
+		},
 	)
 
 	rd.motion_vectors_pipeline = pipeline_manager_add_compute(
@@ -552,6 +576,7 @@ renderer_cleanup :: proc(rd: ^Renderer) {
 	destroy_image(rd.device, rd.visbuffer)
 	destroy_image(rd.device, rd.depth_image)
 	destroy_image(rd.device, rd.rtao_image)
+	destroy_image(rd.device, rd.rtao_denoised_image)
 	destroy_image(rd.device, rd.prev_rtao_image)
 	destroy_image(rd.device, rd.prev_depth_image)
 	destroy_image(rd.device, rd.velocity_image)
@@ -695,6 +720,31 @@ rtao_pass :: proc(resources: []Render_Resource, user_data: rawptr, cb: vk.Comman
 	)
 }
 
+rtao_denoise_pass :: proc(resources: []Render_Resource, user_data: rawptr, cb: vk.CommandBuffer) {
+	rd := cast(^Renderer)user_data
+	pc := Rtao_Denoise_Push {
+		frame_data  = rd.frame.frame_data_buffer.device_address,
+		ao_input    = rd.rtao_image.bindless_idx,
+		ao_output   = rd.rtao_denoised_image.bindless_idx,
+		depth_image = rd.depth_image_tex_idx,
+	}
+	vk.CmdPushConstants(
+		cb,
+		rd.rtao_denoise_pipeline.layout,
+		{.COMPUTE},
+		0,
+		size_of(Rtao_Denoise_Push),
+		&pc,
+	)
+	bind_compute_pipeline(cb, rd.rtao_denoise_pipeline)
+	vk.CmdDispatch(
+		cb,
+		(rd.frame.width / RTAO_RES_DIVISOR + 7) / 8,
+		(rd.frame.height / RTAO_RES_DIVISOR + 7) / 8,
+		1,
+	)
+}
+
 history_copy_pass :: proc(resources: []Render_Resource, user_data: rawptr, cb: vk.CommandBuffer) {
 	rd := cast(^Renderer)user_data
 
@@ -782,7 +832,7 @@ shading_pass :: proc(resources: []Render_Resource, user_data: rawptr, cb: vk.Com
 		frame_data            = rd.frame.frame_data_buffer.device_address,
 		visbuffer             = rd.visbuffer.bindless_idx,
 		draw_image            = rd.draw_image.bindless_idx,
-		rtao_image            = rd.rtao_image_tex_idx,
+		rtao_image            = rd.rtao_denoised_image_tex_idx,
 		rtao_enabled          = 1 if rd.frame.rtao_enabled else 0,
 		index_buffer          = rd.frame.scene.index_buffer.device_address,
 		vertex_buffer         = rd.frame.scene.position_buffer.device_address,
@@ -1127,6 +1177,25 @@ renderer_draw :: proc(
 				usage = {stage = {.COMPUTE_SHADER}, access = {.SHADER_STORAGE_WRITE}},
 			},
 		)
+
+		render_graph_add_pass(
+			&rd.rg,
+			"rtao_denoise",
+			rtao_denoise_pass,
+			rd,
+			{
+				target = &rd.rtao_image,
+				usage = {stage = {.COMPUTE_SHADER}, access = {.SHADER_STORAGE_READ}},
+			},
+			{
+				target = &rd.depth_image,
+				usage = {stage = {.COMPUTE_SHADER}, access = {.SHADER_SAMPLED_READ}},
+			},
+			{
+				target = &rd.rtao_denoised_image,
+				usage = {stage = {.COMPUTE_SHADER}, access = {.SHADER_STORAGE_WRITE}},
+			},
+		)
 	}
 
 	render_graph_add_pass(
@@ -1139,7 +1208,7 @@ renderer_draw :: proc(
 			usage = {stage = {.COMPUTE_SHADER}, access = {.SHADER_STORAGE_READ}},
 		},
 		{
-			target = &rd.rtao_image,
+			target = &rd.rtao_denoised_image,
 			usage = {stage = {.COMPUTE_SHADER}, access = {.SHADER_SAMPLED_READ}},
 		},
 		{

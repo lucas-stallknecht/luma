@@ -236,10 +236,11 @@ main :: proc() {
 		}
 		proj_view := camera_jittered_proj(&camera, jitter) * camera_get_view(&camera)
 		frame_data := Frame_Data {
-			proj_view         = proj_view,
-			inv_proj_view     = glsl.inverse(proj_view),
-			prev_proj_view    = rd.prev_proj_view,
-			camera_position   = camera.position,
+			proj_view          = proj_view,
+			inv_proj_view      = glsl.inverse(proj_view),
+			prev_proj_view     = rd.prev_proj_view,
+			prev_inv_proj_view = glsl.inverse(rd.prev_proj_view),
+			camera_position    = camera.position,
 			texture_sampler   = rd.texture_sampler_idx,
 			light_dir         = glsl.normalize(light_dir),
 			light_color       = light_color,
