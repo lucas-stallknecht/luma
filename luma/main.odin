@@ -74,13 +74,18 @@ main :: proc() {
 		height = max(prompt_int("Window height", height), 1)
 	}
 
-	window: Window
-	if !window_init(&window, u32(width), u32(height)) do return
-	defer window_cleanup(&window)
+	if !glfw.Init() {
+		fmt.println("[Window] GLFW initialization failed")
+		return
+	}
 
 	device: Device
 	device_init(&device, {enable_validation = ODIN_DEBUG, prompt_gpu = !ODIN_DEBUG})
 	defer device_cleanup(&device)
+
+	window: Window
+	if !window_init(&window, u32(width), u32(height)) do return
+	defer window_cleanup(&window)
 
 	swapchain := create_swapchain(
 		&device,
