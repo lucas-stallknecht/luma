@@ -18,8 +18,8 @@ Each frame is a render graph rebuilt from scratch, with barriers inferred from e
 - **Rasterized visbuffer with shading in compute.** This will be proven useful once there are multiple point lights to shade.
 - **Frostbite BRDF shading**, plus the usual essentials like normal mapping.
 - **Ray traced directional hard shadows.** Soft shadows will follow.
-- **Ray traced ambient occlusion**, with motion vectors driving temporal reprojection to denoise it.
-- **Temporal anti-aliasing**, using subpixel camera jitter and motion-vector reprojection.
+- **Ray traced ambient occlusion**, denoised using temporal reprojection and bilateral filtering.
+- **Temporal anti-aliasing** using already present motion vectors and subpixel camera jitter.
 - **Physically correct bloom.**
 - **DDGI** for global illumination, using irradiance probes. Radiance is stored as spherical harmonics, with the coefficients computed by shooting rays around each probe and integrating with Monte Carlo. Bounces accumulate over frames. The per-probe depth with octahedral mapping isn't implemented yet.
 
