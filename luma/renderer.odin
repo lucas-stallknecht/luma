@@ -95,6 +95,7 @@ Shading_Push :: struct {
 	visbuffer:             u32,
 	draw_image:            u32,
 	rtao_image:            u32,
+	rtao_enabled:          u32,
 	index_buffer:          vk.DeviceAddress,
 	vertex_buffer:         vk.DeviceAddress,
 	draw_data_buffer:      vk.DeviceAddress,
@@ -132,6 +133,7 @@ Present_Push :: struct {
 	bloom_sampler:   u32,
 	bloom_intensity: f32,
 	velocity_image:  u32,
+	tonemap_enabled: u32,
 }
 
 Probe_Debug_Push :: struct {
@@ -197,6 +199,10 @@ Renderer :: struct {
 		bloom_filter_radius: f32,
 		jitter:              glsl.vec2,
 		prev_jitter:         glsl.vec2,
+		rtao_enabled:        bool,
+		taa_enabled:         bool,
+		bloom_enabled:       bool,
+		tonemap_enabled:     bool,
 	},
 }
 
@@ -690,50 +696,55 @@ rtao_pass :: proc(resources: []Render_Resource, user_data: rawptr, cb: vk.Comman
 
 history_copy_pass :: proc(resources: []Render_Resource, user_data: rawptr, cb: vk.CommandBuffer) {
 	rd := cast(^Renderer)user_data
-	rtao_copy_region := vk.ImageCopy {
-		srcSubresource = {aspectMask = {.COLOR}, layerCount = 1},
-		dstSubresource = {aspectMask = {.COLOR}, layerCount = 1},
-		extent = {rd.frame.width / RTAO_RES_DIVISOR, rd.frame.height / RTAO_RES_DIVISOR, 1},
-	}
-	vk.CmdCopyImage(
-		cb,
-		rd.rtao_image.image,
-		.GENERAL,
-		rd.prev_rtao_image.image,
-		.GENERAL,
-		1,
-		&rtao_copy_region,
-	)
 
-	depth_copy_region := vk.ImageCopy {
-		srcSubresource = {aspectMask = {.DEPTH}, layerCount = 1},
-		dstSubresource = {aspectMask = {.DEPTH}, layerCount = 1},
-		extent = {rd.frame.width, rd.frame.height, 1},
-	}
-	vk.CmdCopyImage(
-		cb,
-		rd.depth_image.image,
-		.GENERAL,
-		rd.prev_depth_image.image,
-		.GENERAL,
-		1,
-		&depth_copy_region,
-	)
+	if rd.frame.rtao_enabled {
+		rtao_copy_region := vk.ImageCopy {
+			srcSubresource = {aspectMask = {.COLOR}, layerCount = 1},
+			dstSubresource = {aspectMask = {.COLOR}, layerCount = 1},
+			extent = {rd.frame.width / RTAO_RES_DIVISOR, rd.frame.height / RTAO_RES_DIVISOR, 1},
+		}
+		vk.CmdCopyImage(
+			cb,
+			rd.rtao_image.image,
+			.GENERAL,
+			rd.prev_rtao_image.image,
+			.GENERAL,
+			1,
+			&rtao_copy_region,
+		)
 
-	taa_copy_region := vk.ImageCopy {
-		srcSubresource = {aspectMask = {.COLOR}, layerCount = 1},
-		dstSubresource = {aspectMask = {.COLOR}, layerCount = 1},
-		extent = {rd.frame.width, rd.frame.height, 1},
+		depth_copy_region := vk.ImageCopy {
+			srcSubresource = {aspectMask = {.DEPTH}, layerCount = 1},
+			dstSubresource = {aspectMask = {.DEPTH}, layerCount = 1},
+			extent = {rd.frame.width, rd.frame.height, 1},
+		}
+		vk.CmdCopyImage(
+			cb,
+			rd.depth_image.image,
+			.GENERAL,
+			rd.prev_depth_image.image,
+			.GENERAL,
+			1,
+			&depth_copy_region,
+		)
 	}
-	vk.CmdCopyImage(
-		cb,
-		rd.taa_image.image,
-		.GENERAL,
-		rd.prev_taa_image.image,
-		.GENERAL,
-		1,
-		&taa_copy_region,
-	)
+
+	if rd.frame.taa_enabled {
+		taa_copy_region := vk.ImageCopy {
+			srcSubresource = {aspectMask = {.COLOR}, layerCount = 1},
+			dstSubresource = {aspectMask = {.COLOR}, layerCount = 1},
+			extent = {rd.frame.width, rd.frame.height, 1},
+		}
+		vk.CmdCopyImage(
+			cb,
+			rd.taa_image.image,
+			.GENERAL,
+			rd.prev_taa_image.image,
+			.GENERAL,
+			1,
+			&taa_copy_region,
+		)
+	}
 }
 
 motion_vectors_pass :: proc(
@@ -771,6 +782,7 @@ shading_pass :: proc(resources: []Render_Resource, user_data: rawptr, cb: vk.Com
 		visbuffer             = rd.visbuffer.bindless_idx,
 		draw_image            = rd.draw_image.bindless_idx,
 		rtao_image            = rd.rtao_image_tex_idx,
+		rtao_enabled          = 1 if rd.frame.rtao_enabled else 0,
 		index_buffer          = rd.frame.scene.index_buffer.device_address,
 		vertex_buffer         = rd.frame.scene.position_buffer.device_address,
 		draw_data_buffer      = rd.frame.scene.draw_data_buffer.device_address,
@@ -962,12 +974,14 @@ present_pass :: proc(resources: []Render_Resource, user_data: rawptr, cb: vk.Com
 	vk.CmdSetViewportWithCount(cb, 1, &rd.frame.viewport)
 	vk.CmdSetScissorWithCount(cb, 1, &rd.frame.render_area)
 
+	color_idx := rd.taa_image.bindless_idx if rd.frame.taa_enabled else rd.draw_image.bindless_idx
 	present_pc := Present_Push {
-		taa_image       = rd.taa_image.bindless_idx,
+		taa_image       = color_idx,
 		bloom_texture   = rd.bloom_image.bindless_idx,
 		bloom_sampler   = rd.bloom_sampler_idx,
-		bloom_intensity = rd.frame.bloom_intensity,
+		bloom_intensity = rd.frame.bloom_intensity if rd.frame.bloom_enabled else 0,
 		velocity_image  = rd.velocity_image.bindless_idx,
+		tonemap_enabled = 1 if rd.frame.tonemap_enabled else 0,
 	}
 	vk.CmdPushConstants(
 		cb,
@@ -1068,47 +1082,51 @@ renderer_draw :: proc(
 		},
 	)
 
-	render_graph_add_pass(
-		&rd.rg,
-		"motion_vectors",
-		motion_vectors_pass,
-		rd,
-		{
-			target = &rd.visbuffer,
-			usage = {stage = {.COMPUTE_SHADER}, access = {.SHADER_STORAGE_READ}},
-		},
-		{
-			target = &rd.velocity_image,
-			usage = {stage = {.COMPUTE_SHADER}, access = {.SHADER_STORAGE_WRITE}},
-		},
-	)
+	if rd.frame.rtao_enabled || rd.frame.taa_enabled {
+		render_graph_add_pass(
+			&rd.rg,
+			"motion_vectors",
+			motion_vectors_pass,
+			rd,
+			{
+				target = &rd.visbuffer,
+				usage = {stage = {.COMPUTE_SHADER}, access = {.SHADER_STORAGE_READ}},
+			},
+			{
+				target = &rd.velocity_image,
+				usage = {stage = {.COMPUTE_SHADER}, access = {.SHADER_STORAGE_WRITE}},
+			},
+		)
+	}
 
-	render_graph_add_pass(
-		&rd.rg,
-		"rtao",
-		rtao_pass,
-		rd,
-		{
-			target = &rd.visbuffer,
-			usage = {stage = {.COMPUTE_SHADER}, access = {.SHADER_STORAGE_READ}},
-		},
-		{
-			target = &rd.velocity_image,
-			usage = {stage = {.COMPUTE_SHADER}, access = {.SHADER_STORAGE_READ}},
-		},
-		{
-			target = &rd.prev_rtao_image,
-			usage = {stage = {.COMPUTE_SHADER}, access = {.SHADER_SAMPLED_READ}},
-		},
-		{
-			target = &rd.prev_depth_image,
-			usage = {stage = {.COMPUTE_SHADER}, access = {.SHADER_SAMPLED_READ}},
-		},
-		{
-			target = &rd.rtao_image,
-			usage = {stage = {.COMPUTE_SHADER}, access = {.SHADER_STORAGE_WRITE}},
-		},
-	)
+	if rd.frame.rtao_enabled {
+		render_graph_add_pass(
+			&rd.rg,
+			"rtao",
+			rtao_pass,
+			rd,
+			{
+				target = &rd.visbuffer,
+				usage = {stage = {.COMPUTE_SHADER}, access = {.SHADER_STORAGE_READ}},
+			},
+			{
+				target = &rd.velocity_image,
+				usage = {stage = {.COMPUTE_SHADER}, access = {.SHADER_STORAGE_READ}},
+			},
+			{
+				target = &rd.prev_rtao_image,
+				usage = {stage = {.COMPUTE_SHADER}, access = {.SHADER_SAMPLED_READ}},
+			},
+			{
+				target = &rd.prev_depth_image,
+				usage = {stage = {.COMPUTE_SHADER}, access = {.SHADER_SAMPLED_READ}},
+			},
+			{
+				target = &rd.rtao_image,
+				usage = {stage = {.COMPUTE_SHADER}, access = {.SHADER_STORAGE_WRITE}},
+			},
+		)
+	}
 
 	render_graph_add_pass(
 		&rd.rg,
@@ -1137,67 +1155,103 @@ renderer_draw :: proc(
 		},
 	)
 
-	render_graph_add_pass(
-		&rd.rg,
-		"taa",
-		taa_pass,
-		rd,
-		{
-			target = &rd.draw_image,
-			usage = {stage = {.COMPUTE_SHADER}, access = {.SHADER_STORAGE_READ}},
-		},
-		{
-			target = &rd.velocity_image,
-			usage = {stage = {.COMPUTE_SHADER}, access = {.SHADER_STORAGE_READ}},
-		},
-		{
-			target = &rd.prev_taa_image,
-			usage = {stage = {.COMPUTE_SHADER}, access = {.SHADER_SAMPLED_READ}},
-		},
-		{
-			target = &rd.taa_image,
-			usage = {stage = {.COMPUTE_SHADER}, access = {.SHADER_STORAGE_WRITE}},
-		},
-	)
+	if rd.frame.taa_enabled {
+		render_graph_add_pass(
+			&rd.rg,
+			"taa",
+			taa_pass,
+			rd,
+			{
+				target = &rd.draw_image,
+				usage = {stage = {.COMPUTE_SHADER}, access = {.SHADER_STORAGE_READ}},
+			},
+			{
+				target = &rd.velocity_image,
+				usage = {stage = {.COMPUTE_SHADER}, access = {.SHADER_STORAGE_READ}},
+			},
+			{
+				target = &rd.prev_taa_image,
+				usage = {stage = {.COMPUTE_SHADER}, access = {.SHADER_SAMPLED_READ}},
+			},
+			{
+				target = &rd.taa_image,
+				usage = {stage = {.COMPUTE_SHADER}, access = {.SHADER_STORAGE_WRITE}},
+			},
+		)
+	}
 
-	// preserve this frame's rtao, depth and resolved TAA output for next frame to reproject
-	render_graph_add_pass(
-		&rd.rg,
-		"history_copy",
-		history_copy_pass,
-		rd,
-		{target = &rd.rtao_image, usage = {stage = {.TRANSFER}, access = {.TRANSFER_READ}}},
-		{target = &rd.prev_rtao_image, usage = {stage = {.TRANSFER}, access = {.TRANSFER_WRITE}}},
-		{target = &rd.depth_image, usage = {stage = {.TRANSFER}, access = {.TRANSFER_READ}}},
-		{target = &rd.prev_depth_image, usage = {stage = {.TRANSFER}, access = {.TRANSFER_WRITE}}},
-		{target = &rd.taa_image, usage = {stage = {.TRANSFER}, access = {.TRANSFER_READ}}},
-		{target = &rd.prev_taa_image, usage = {stage = {.TRANSFER}, access = {.TRANSFER_WRITE}}},
-	)
+	history_resources := make([dynamic]Render_Resource, context.temp_allocator)
+	if rd.frame.rtao_enabled {
+		append(
+			&history_resources,
+			Render_Resource {
+				target = &rd.rtao_image,
+				usage = {stage = {.TRANSFER}, access = {.TRANSFER_READ}},
+			},
+			Render_Resource {
+				target = &rd.prev_rtao_image,
+				usage = {stage = {.TRANSFER}, access = {.TRANSFER_WRITE}},
+			},
+			Render_Resource {
+				target = &rd.depth_image,
+				usage = {stage = {.TRANSFER}, access = {.TRANSFER_READ}},
+			},
+			Render_Resource {
+				target = &rd.prev_depth_image,
+				usage = {stage = {.TRANSFER}, access = {.TRANSFER_WRITE}},
+			},
+		)
+	}
+	if rd.frame.taa_enabled {
+		append(
+			&history_resources,
+			Render_Resource {
+				target = &rd.taa_image,
+				usage = {stage = {.TRANSFER}, access = {.TRANSFER_READ}},
+			},
+			Render_Resource {
+				target = &rd.prev_taa_image,
+				usage = {stage = {.TRANSFER}, access = {.TRANSFER_WRITE}},
+			},
+		)
+	}
+	if len(history_resources) > 0 {
+		render_graph_add_pass(
+			&rd.rg,
+			"history_copy",
+			history_copy_pass,
+			rd,
+			..history_resources[:],
+		)
+	}
 
-	render_graph_add_pass(
-		&rd.rg,
-		"bloom",
-		bloom_pass,
-		rd,
-		// bloom_downsample samples draw_image (pre-TAA) through a plain texture view (mip 0 only)
-		// reading it pre-TAA means bloom waits only on shading, not on the TAA pass so it can run in parallel
-		{
-			target = &rd.draw_image,
-			usage = {stage = {.COMPUTE_SHADER}, access = {.SHADER_SAMPLED_READ}},
-		},
-		{
-			target = &rd.bloom_image,
-			usage = {stage = {.COMPUTE_SHADER}, access = {.SHADER_SAMPLED_READ}},
-		},
-	)
+	if rd.frame.bloom_enabled {
+		render_graph_add_pass(
+			&rd.rg,
+			"bloom",
+			bloom_pass,
+			rd,
+			// bloom_downsample samples draw_image (pre-TAA) through a plain texture view (mip 0 only)
+			// reading it pre-TAA means bloom waits only on shading, not on the TAA pass so it can run in parallel
+			{
+				target = &rd.draw_image,
+				usage = {stage = {.COMPUTE_SHADER}, access = {.SHADER_SAMPLED_READ}},
+			},
+			{
+				target = &rd.bloom_image,
+				usage = {stage = {.COMPUTE_SHADER}, access = {.SHADER_SAMPLED_READ}},
+			},
+		)
+	}
 
+	color_target := &rd.taa_image if rd.frame.taa_enabled else &rd.draw_image
 	render_graph_add_pass(
 		&rd.rg,
 		"present",
 		present_pass,
 		rd,
 		{
-			target = &rd.taa_image,
+			target = color_target,
 			usage = {stage = {.FRAGMENT_SHADER}, access = {.SHADER_STORAGE_READ}},
 		},
 		{

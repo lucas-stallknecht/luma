@@ -29,6 +29,7 @@ layout(push_constant) uniform PushConstants {
     uint bloom_sampler;
     float bloom_intensity;
     uint velocity_image;
+    uint tonemap_enabled;
 } push;
 
 layout(location = 0) out vec4 frag_color;
@@ -71,7 +72,7 @@ void frag_main() {
     hdr_color.rgb = mix(hdr_color.rgb, bloom_color, push.bloom_intensity);
 
     vec3 linear_color = pow(hdr_color.rgb, vec3(1.0 / 2.2));
-    vec3 final_color = pbr_neutral_tonemapping(linear_color);
+    vec3 final_color = push.tonemap_enabled != 0u ? pbr_neutral_tonemapping(linear_color) : linear_color;
 
     frag_color = vec4(final_color, 1.0);
 }

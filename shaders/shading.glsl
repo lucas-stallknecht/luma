@@ -31,6 +31,7 @@ layout(push_constant) uniform PushConstants {
     uint visbuffer;
     uint draw_image;
     uint rtao_image;
+    uint rtao_enabled;
     IndexBuffer index_buffer;
     VertexBuffer vertex_buffer;
     DrawDataBuffer draw_data_buffer;
@@ -126,7 +127,8 @@ void main() {
 
     // ambient occlusion
     vec2 screen_uv = (vec2(coord) + 0.5) / vec2(size);
-    float ao = texture(TEX_UNI(push.rtao_image, frame_data.texture_sampler), screen_uv).r;
+    float ao = push.rtao_enabled != 0u
+        ? texture(TEX_UNI(push.rtao_image, frame_data.texture_sampler), screen_uv).r : 1.0;
 
     // indirect diffuse from the probe grid
     vec3 view_dir = normalize(frame_data.camera_position - hit.world_pos);

@@ -112,6 +112,10 @@ main :: proc() {
 	show_probes := false
 	bloom_intensity: f32 = 0.04
 	bloom_filter_radius: f32 = 0.001
+	rtao_enabled := true
+	taa_enabled := true
+	bloom_enabled := true
+	tonemap_enabled := true
 
 	last_frame_time: f64 = glfw.GetTime()
 	reload_key_prev: bool = false
@@ -164,12 +168,20 @@ main :: proc() {
 			imgui.SliderFloat("Noise pan speed", &cloud_noise_speed, 0.01, 0.5)
 
 			imgui.SeparatorText("Ambient Occlusion")
+			imgui.Checkbox("Enable AO", &rtao_enabled)
 			imgui.SliderFloat("Radius", &rtao_radius, 0, 2)
 			imgui.SliderFloat("Power", &rtao_pow, 0.1, 8)
 
 			imgui.SeparatorText("Bloom")
+			imgui.Checkbox("Enable bloom", &bloom_enabled)
 			imgui.SliderFloat("Bloom intensity", &bloom_intensity, 0.001, 0.2)
 			imgui.SliderFloat("Filter radius", &bloom_filter_radius, 0.001, 0.01)
+
+			imgui.SeparatorText("Anti-aliasing")
+			imgui.Checkbox("TAA", &taa_enabled)
+
+			imgui.SeparatorText("Tonemapping")
+			imgui.Checkbox("Enable tonemapping", &tonemap_enabled)
 
 			imgui.SeparatorText("Global Illumination")
 			imgui.Checkbox("Show probes", &show_probes)
@@ -181,10 +193,13 @@ main :: proc() {
 		swapchain_image := swapchain_acquire_image(&swapchain)
 		handle, cb := command_handler_acquire(&device.command_handler)
 
-		jitter_px := camera_taa_jitter(u32(swapchain.frame_idx))
-		jitter := glsl.vec2 {
-			jitter_px.x * 2.0 / f32(window.width),
-			jitter_px.y * 2.0 / f32(window.height),
+		jitter: glsl.vec2
+		if taa_enabled {
+			jitter_px := camera_taa_jitter(u32(swapchain.frame_idx))
+			jitter = {
+				jitter_px.x * 2.0 / f32(window.width),
+				jitter_px.y * 2.0 / f32(window.height),
+			}
 		}
 		proj_view := camera_jittered_proj(&camera, jitter) * camera_get_view(&camera)
 		frame_data := Frame_Data {
@@ -232,6 +247,10 @@ main :: proc() {
 			bloom_filter_radius = bloom_filter_radius,
 			jitter = jitter,
 			prev_jitter = prev_jitter,
+			rtao_enabled = rtao_enabled,
+			taa_enabled = taa_enabled,
+			bloom_enabled = bloom_enabled,
+			tonemap_enabled = tonemap_enabled,
 		}
 		prev_jitter = jitter
 
