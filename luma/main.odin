@@ -182,6 +182,13 @@ main :: proc() {
 			fps := 1.0 / dt if dt > 0 else 0
 			imgui.Text("%.2f ms (%.0f fps)", dt * 1000, fps)
 
+			imgui.SeparatorText("Camera")
+			imgui.SliderFloat("Move speed", &camera.move_speed, 0.5, 20)
+			imgui.SliderFloat("Look sensitivity", &camera.look_sensitivity, 0.05, 1.0)
+			if imgui.SliderFloat("FOV", &camera.fov, 30, 120) {
+				camera_update_proj(&camera, f32(window.width) / f32(window.height))
+			}
+
 			imgui.SeparatorText("Lighting")
 			imgui.SliderFloat3("Direction", cast(^[3]f32)&light_dir, -1, 1)
 			imgui.ColorEdit3("Color", cast(^[3]f32)&light_color)

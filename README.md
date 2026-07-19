@@ -43,6 +43,13 @@ You'll need a GPU with ray tracing support and an up to date driver. This has on
 
 On launch it will ask you to pick a window size and a GPU in the console before opening the render window.
 
+## Controls
+
+- **Right mouse button** (hold): look around
+- **WASD**: move
+- **Space** / **Left Ctrl**: move up / down
+- **R**: reload shaders on the fly
+
 ## Building from source
 
 You'll need the [Odin compiler](https://odin-lang.org/), the [Vulkan SDK](https://vulkan.lunarg.com/), Python, and Git installed, along with a GPU that supports Vulkan ray tracing (`VK_KHR_ray_tracing_pipeline`). With those in place:
